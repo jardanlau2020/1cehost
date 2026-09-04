@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       use_warp:
-        description: '用 Cloudflare WARP 換出口 IP（系統級全局）'
+        description: '用 WARP (wgcf+wireproxy SOCKS5) 換出口 IP'
         type: boolean
         default: true
 
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v6
@@ -28,20 +28,61 @@ jobs:
           pip install seleniumbase requests
           seleniumbase install chromedriver
 
-      - name: 🌍 掛 Cloudflare WARP（系統級全局，唔係 socks）
+      - name: 🌍 快速 WARP（wgcf + wireproxy，SOCKS5 127.0.0.1:10808）
         if: ${{ inputs.use_warp }}
         continue-on-error: true
-        uses: fscarmen/warp-on-actions@v1.1
+        run: |
+          set -e
+          cd /tmp
+          # wgcf：產生 Cloudflare WARP WireGuard 設定檔
+          curl -sSL -o wgcf "https://github.com/ViRb3/wgcf/releases/latest/download/wgcf_2.2.28_linux_amd64"
+          chmod +x wgcf
+          echo | ./wgcf register --accept-tos || true
+          ./wgcf generate || true
+          ls -la wgcf-account.toml wgcf-profile.conf || true
+          # 解析 profile 嘅 PrivateKey/Peer
+          PRIV=$(grep -A1 '^\[Interface\]' wgcf-profile.conf | grep PrivateKey | sed 's/.*= //')
+          PEER=$(grep -A3 '^\[Peer\]' wgcf-profile.conf | grep PublicKey | sed 's/.*= //')
+          ENDP=$(grep -A3 '^\[Peer\]' wgcf-profile.conf | grep Endpoint | sed 's/.*= //')
+          echo "PRIV=$PRIV PEER=$PEER ENDP=$ENDP"
+          # wireproxy：userspace WireGuard → SOCKS5
+          curl -sSL -o wp.tar.gz "https://github.com/pufferffish/wireproxy/releases/latest/download/wireproxy_linux_amd64.tar.gz"
+          tar xzf wp.tar.gz
+          ls -la wireproxy || ls -la
+          cat > /tmp/wp.conf <<EOF
+[Interface]
+PrivateKey = $PRIV
+Address = 172.16.0.2/32, fd01:5ca1:ab1e:823e:e094::8888/128
+DNS = 1.1.1.1
+
+[Socks5]
+BindAddress = 127.0.0.1:10808
+
+[Peer]
+PublicKey = $PEER
+Endpoint = $ENDP
+PersistentKeepalive = 25
+AllowedIPs = 0.0.0.0/0, ::/0
+EOF
+          cat /tmp/wp.conf
+          nohup /tmp/wireproxy -c /tmp/wp.conf > /tmp/wireproxy.log 2>&1 &
+          sleep 3
+          echo "--- wireproxy.log ---"
+          cat /tmp/wireproxy.log || true
+          # 驗證 SOCKS5
+          curl -s --max-time 15 -x socks5h://127.0.0.1:10808 https://api.ipify.org || echo "SOCKS5 未通"
 
       - name: 📍 確認出口 IP
         continue-on-error: true
         run: |
-          echo "出口 IP: $(curl -s4 --max-time 15 https://api.ipify.org || echo n/a)"
-          curl -s4 --max-time 15 https://ipinfo.io/json || true
+          echo "WARP(SOCKS5) 出口: $(curl -s --max-time 15 -x socks5h://127.0.0.1:10808 https://api.ipify.org || echo n/a)"
+          echo "WARP IP 詳情:"
+          curl -s --max-time 15 -x socks5h://127.0.0.1:10808 https://ipinfo.io/json || true
 
-      - name: 🔍 探路（WARP 生效後係全局，唔設 PROBE_PROXY）
+      - name: 🔍 探路（直連 / WARP 兩條路都測）
         env:
           PROBE_URL: https://dash.icehost.pl/
+          PROBE_PROXY: ${{ inputs.use_warp && 'socks5://127.0.0.1:10808' || '' }}
         run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 probe.py
 
       - name: 📸 上傳截圖
