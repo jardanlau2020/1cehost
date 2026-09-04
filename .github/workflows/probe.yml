@@ -2,11 +2,16 @@ name: IceHost Probe (WAF/CF 探路，零憑據)
 
 on:
   workflow_dispatch:
+    inputs:
+      use_warp:
+        description: '用 Cloudflare WARP 換出口 IP'
+        type: boolean
+        default: true
 
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v6
@@ -23,9 +28,25 @@ jobs:
           pip install seleniumbase requests
           seleniumbase install chromedriver
 
-      - name: 🔍 探路（直連，唔用代理）
+      - name: 🌍 掛 Cloudflare WARP（換出口 IP）
+        if: ${{ inputs.use_warp }}
+        continue-on-error: true
+        uses: fscarmen/warp-on-actions@v1.1
+        with:
+          mode: wireproxy
+
+      - name: 📍 WARP 後出口 IP
+        if: ${{ inputs.use_warp }}
+        continue-on-error: true
+        run: |
+          echo "直連 IP  : $(curl -s --max-time 15 https://api.ipify.org || echo 'n/a')"
+          echo "WARP IP  : $(curl -s --max-time 15 -x socks5h://127.0.0.1:40000 https://api.ipify.org || echo 'n/a')"
+          curl -s --max-time 15 -x socks5h://127.0.0.1:40000 https://ipinfo.io/json || true
+
+      - name: 🔍 探路
         env:
           PROBE_URL: https://dash.icehost.pl/
+          PROBE_PROXY: ${{ inputs.use_warp && 'socks5://127.0.0.1:40000' || '' }}
         run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 probe.py
 
       - name: 📸 上傳截圖
