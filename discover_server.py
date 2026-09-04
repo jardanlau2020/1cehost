@@ -2,7 +2,6 @@ import os
 import json
 import urllib.parse
 import re
-import requests
 from seleniumbase import SB
 
 COOKIES = os.getenv("ICEHOST_COOKIES", "").strip()
@@ -27,52 +26,52 @@ def send_cookies(br):
             "secure": True,
         })
 
-# === A. selenium 睇 freeservers 完整內容 + 撳 SHOW MY SERVERS ===
+def dump(body_tag, n=200):
+    print(f"=== {body_tag} ===")
+    body = sb.get_text("body") or ""
+    for l in body.splitlines():
+        s = l.strip()
+        if s:
+            print("  ", s[:200])
+
 with SB(uc=True, xvfb=True) as sb:
     sb.uc_open_with_reconnect("https://dash.icehost.pl/", reconnect_time=8)
     sb.sleep(6)
     send_cookies(sb)
     sb.refresh()
-    sb.sleep(6)
+    sb.sleep(8)
 
-    # 撳 SHOW MY SERVERS
+    print("STEP1 首頁 URL:", sb.get_current_url())
+    dump("首頁 body")
+
+    # 嘗試撳 SHOW MY SERVERS
+    for label in ["SHOW MY SERVERS", "SHOW ASSIGNED SERVERS"]:
+        try:
+            el = sb.find_element(f"text={label}", timeout=4)
+            print(f"STEP2 撳 {label}")
+            el.click()
+            sb.sleep(4)
+            print("   URL:", sb.get_current_url())
+            dump(f"撳完 {label} body")
+        except Exception as e:
+            print(f"STEP2 {label} 撳唔到: {str(e)[:100]}")
+
+    # 嘗試撳 server 名 / 搵 server 卡片撳入去
     try:
-        btn = sb.find_element("text=SHOW MY SERVERS", timeout=5)
-        print("SHOW MY SERVERS 按鈕揾到, 撳緊...")
-        btn.click()
+        el = sb.find_element("text=Serwer testowy", timeout=5)
+        print("STEP3 撳 server 名 Serwer testowy")
+        el.click()
         sb.sleep(5)
+        print("   URL:", sb.get_current_url())
+        dump("撳入 server body")
     except Exception as e:
-        print("SHOW MY SERVERS:", str(e)[:120])
+        print("STEP3 撳 server 名: ", str(e)[:120])
 
-    print("URL now:", sb.get_current_url())
-    body = sb.get_text("body") or ""
-    lines = [l.strip() for l in body.splitlines() if l.strip()]
-    print(f"=== body 共 {len(lines)} 行, 全部印 ===")
-    for l in lines[:150]:
-        print("  ", l[:160])
-
-    # 搵數字 pattern / server id
-    m = re.findall(r"/servers?/(\d+)", sb.get_page_source())
-    print("servers/{id} 出現:", set(m))
-    # data-id / data-server 屬性
-    for el in sb.find_elements("[data-id]"):
-        print("data-id:", el.get_attribute("data-id"), "| text:", (el.text or "")[:60])
-    sb.save_screenshot("discover_screenshot.png")
-
-# === B. requests 直打 API 端點(純 HTTP) ===
-print("=== B. API 探測 ===")
-s = requests.Session()
-s.cookies.set("icehostpl_session", token_value, domain="dash.icehost.pl", path="/")
-s.cookies.set("XSRF-TOKEN", token_value, domain="dash.icehost.pl", path="/")
-s.headers.update({"User-Agent": "Mozilla/5.0", "X-Requested-With": "XMLHttpRequest"})
-
-for path in ["/api/servers", "/api/client/servers", "/api/user/servers",
-             "/api/freeservers", "/api/v1/servers", "/servers.json",
-             "/api/servers/list", "/api/me/servers"]:
+    # JS history 睇實際 SPA 路由
     try:
-        r = s.get("https://dash.icehost.pl" + path, timeout=20)
-        ct = r.headers.get("content-type", "")
-        snippet = r.text[:200].replace("\n", " ")
-        print(f"  GET {path} → {r.status_code} {ct.split(';')[0]} | {snippet}")
+        hist = sb.execute_script("return window.location.href;")
+        print("STEP4 location.href:", hist)
     except Exception as e:
-        print(f"  GET {path} → ERR {str(e)[:100]}")
+        print("STEP4:", str(e)[:80])
+
+    sb.save_screenshot("discover_screenshot.png")
