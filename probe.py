@@ -14,6 +14,7 @@ import sys
 import time
 
 TARGET = os.environ.get("PROBE_URL", "https://dash.icehost.pl/")
+PROXY = os.environ.get("PROBE_PROXY", "").strip()
 
 
 def probe_requests():
@@ -24,9 +25,19 @@ def probe_requests():
     print("【一】純 HTTP 層探測")
     print("=" * 60)
 
+    proxies = None
+    if PROXY:
+        p = PROXY.replace("socks5://", "socks5h://")
+        proxies = {"http": p, "https": p}
+        print(f"🔗 經代理: {p}")
+    else:
+        print("🌐 直連（無代理）")
+
     try:
-        ip = requests.get("https://api.ipify.org", timeout=15).text.strip()
-        print(f"📍 Runner 出口 IP: {ip}")
+        ip = requests.get(
+            "https://api.ipify.org", timeout=15, proxies=proxies
+        ).text.strip()
+        print(f"📍 實際出口 IP: {ip}")
     except Exception as e:
         print(f"⚠️ 拿唔到出口 IP: {e}")
 
@@ -35,6 +46,7 @@ def probe_requests():
             TARGET,
             timeout=25,
             allow_redirects=True,
+            proxies=proxies,
             headers={
                 "User-Agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -74,7 +86,18 @@ def probe_browser():
 
     from seleniumbase import SB
 
-    with SB(uc=True, xvfb=True) as sb:
+    sb_kwargs = {"uc": True, "xvfb": True}
+    if PROXY:
+        sb_kwargs["proxy"] = PROXY
+        print(f"🔗 瀏覽器掛代理: {PROXY}")
+
+    with SB(**sb_kwargs) as sb:
+        try:
+            sb.open("https://api.ipify.org")
+            print(f"📍 瀏覽器出口 IP: {sb.get_text('body').strip()}")
+        except Exception:
+            pass
+
         print(f"🌐 uc_open_with_reconnect: {TARGET}")
         sb.uc_open_with_reconnect(TARGET, reconnect_time=8)
         sb.sleep(6)
