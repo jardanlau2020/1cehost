@@ -33,54 +33,64 @@ with SB(uc=True, xvfb=True) as sb:
     sb.refresh()
     sb.sleep(8)
 
-    # JS 直接撳 #list 內嘅 server card(揾含「Serwer」嘅 p 卡)
-    clicked = sb.execute_script("""
-      const list = document.getElementById('list');
-      if (!list) return 'NO_LIST';
-      const p = Array.from(list.querySelectorAll('p')).find(x => x.textContent.includes('Serwer'));
-      if (!p) return 'NO_SERVER_P';
-      // 向上搵可點擊祖先(article/div/a)
-      let el = p;
-      for (let i=0; i<4; i++) { el = el.parentElement; if (!el) break; }
-      el.click();
-      return 'CLICKED:' + el.tagName + '.' + (el.className||'').toString().slice(0,60);
+    # 1) 挖 JS 函式源碼 — 睇 server URL pattern
+    print("=== JS 函式源碼 ===")
+    for fn in ["openConsole", "openFiles", "openSettings", "openConsole2", "Server"]:
+        try:
+            src = sb.execute_script(f"return typeof {fn} !== 'undefined' ? {fn}.toString().slice(0,600) : 'UNDEFINED';")
+            print(f"[{fn}] {src[:400]}")
+        except Exception as e:
+            print(f"[{fn}] ERR {str(e)[:80]}")
+
+    # 2) 搵 global 有冇 server id
+    print("=== global server 變數 ===")
+    g = sb.execute_script("""
+      const out = [];
+      for (const k of Object.keys(window)) {
+        if (/server|serv|id|panel|console/i.test(k) && k.length < 60) {
+          let v;
+          try { v = window[k]; } catch(e) { v = 'ERR'; }
+          if (v !== null && v !== undefined) {
+            let s = typeof v === 'string' ? v : JSON.stringify(v)?.slice(0,80);
+            if (s && String(s).length < 120) out.push(k + ' = ' + s);
+          }
+        }
+      }
+      return out.slice(0,40);
     """)
-    print("JS CLICK:", clicked)
-    sb.sleep(7)
+    for line in g:
+        print("  ", line)
 
+    # 3) 撳 SHOW ASSIGNED SERVERS tab(JS 精準)
+    print("=== 撳 SHOW ASSIGNED SERVERS ===")
+    clicked = sb.execute_script("""
+      const nodes = Array.from(document.querySelectorAll('*'));
+      const el = nodes.find(n => n.childNodes.length && Array.from(n.childNodes).some(c => c.nodeType===3 && c.textContent.trim()==='SHOW ASSIGNED SERVERS'));
+      if (!el) return 'NOT_FOUND';
+      el.click(); return 'CLICKED ' + el.tagName + '.' + (el.className||'').toString().slice(0,50);
+    """)
+    print(clicked)
+    sb.sleep(5)
     print("URL:", sb.get_current_url())
-    src = sb.get_page_source()
-    print("HTML 長度:", len(src))
 
-    # 完整 body
-    print("=== body ===")
-    body = sb.get_text("body") or ""
-    for l in body.splitlines():
-        s = l.strip()
-        if s:
-            print("  ", s[:180])
+    # 4) same-origin fetch 打 API(瀏覽器內,帶 cookie,WAF 已過)
+    print("=== in-page API fetch ===")
+    api_results = sb.execute_script("""
+      const paths = ['/api/servers','/api/user/servers','/api/client/servers','/api/freeservers','/api/v1/servers','/freeservers/list','/api/servers/list'];
+      return Promise.all(paths.map(async p => {
+        try {
+          const r = await fetch(p, {headers: {'X-Requested-With':'XMLHttpRequest', 'Accept':'application/json'}});
+          const t = await r.text();
+          return p + ' → ' + r.status + ' | ' + t.slice(0,300).replace(/\\n/g,' ');
+        } catch(e) { return p + ' → ERR ' + String(e).slice(0,100); }
+      }));
+    """)
+    for line in api_results:
+        print("  ", line[:350])
 
-    # 搜尋續期關鍵字
-    print("=== 續期關鍵字掃描 ===")
-    for kw in ["dodaj", "add 6", "add6", "przedłuż", "przedluz", "extend", "renew",
-               "6 godzin", "no expiration", "expiration", "godzin", "Konto", "plan"]:
-        ms = list(re.finditer(kw, src, re.IGNORECASE))
-        if ms:
-            m = ms[0]
-            s = max(0, m.start()-80); e = min(len(src), m.end()+80)
-            snippet = re.sub(r"<[^>]+>", " ", src[s:e]).strip()
-            print(f"  [{kw}] x{len(ms)}: ...{snippet[:150]}...")
-
-    # 按鈕/連結列表
-    print("=== buttons ===")
-    for b in sb.find_elements("button"):
-        t = (b.text or "").strip()
-        if t and len(t) < 100:
-            print("  BTN:", t)
-    print("=== 全部 a ===")
-    for a in sb.find_elements("a"):
-        t = (a.text or "").strip()
-        if t and len(t) < 80:
-            print("  A:", t)
+    # 5) 挖 HTML 有冇 hidden server data / JSON state
+    print("=== 頁面內嵌 JSON/state ===")
+    for m in re.finditer(r'window\.__[A-Z_]+\s*=\s*([^<]{0,200})', sb.get_page_source()):
+        print("  __", m.group(0)[:220])
 
     sb.save_screenshot("discover_screenshot.png")
