@@ -26,6 +26,27 @@ def send_cookies(br):
             "secure": True,
         })
 
+def dump_body(tag):
+    print(f"=== {tag} body ===")
+    body = sb.get_text("body") or ""
+    for l in body.splitlines():
+        s = l.strip()
+        if s:
+            print("  ", s[:180])
+
+def search_keywords(tag):
+    print(f"=== {tag} 關鍵字掃描 ===")
+    src = sb.get_page_source()
+    for kw in ["dodaj", "add 6", "add6", "przedłuż", "przedluz", "extend", "renew",
+               "6 godzin", "6h", "godzin", "expiration", "expiry", "rok", "year"]:
+        for m in re.finditer(kw, src, re.IGNORECASE):
+            s = max(0, m.start()-60)
+            e = min(len(src), m.end()+60)
+            snippet = src[s:e].replace("\n", " ")
+            snippet = re.sub(r"<[^>]+>", " ", snippet)
+            print(f"  [{kw}] ...{snippet.strip()[:130]}...")
+            break
+
 with SB(uc=True, xvfb=True) as sb:
     sb.uc_open_with_reconnect("https://dash.icehost.pl/", reconnect_time=8)
     sb.sleep(6)
@@ -33,70 +54,37 @@ with SB(uc=True, xvfb=True) as sb:
     sb.refresh()
     sb.sleep(8)
 
-    # 1) JS 挖 DOM:搵「Serwer testowy」所在元素嘅 outerHTML
-    print("=== JS 搵 Serwer testowy DOM ===")
-    info = sb.execute_script("""
-      const results = [];
-      const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
-      while (walker.nextNode()) {
-        const t = walker.currentNode.textContent.trim();
-        if (t && t.includes('Serwer testowy')) {
-          let el = walker.currentNode.parentElement;
-          let chain = [];
-          for (let i = 0; i < 5 && el; i++) {
-            chain.push(el.tagName + (el.className ? '.' + String(el.className).slice(0,50) : '') + (el.id ? '#' + el.id : ''));
-            el = el.parentElement;
-          }
-          results.push({text: t.slice(0,100), chain: chain.join(' < '), html: walker.currentNode.parentElement.outerHTML.slice(0,500)});
-        }
-      }
-      return results.slice(0,5);
-    """)
-    for r in info:
-        print("TEXT:", r.get("text"))
-        print("CHAIN:", r.get("chain"))
-        print("HTML:", r.get("html"))
-        print("---")
+    dump_body("首頁")
+    search_keywords("首頁")
 
-    # 2) 挖所有 onclick / data-* 有 server 痕跡嘅元素
-    print("=== data-server / onclick 特搜 ===")
-    hits = sb.execute_script("""
-      const out = [];
-      document.querySelectorAll('[data-server-id],[data-id],[data-url],[onclick],[href*="server"],[href*="edit"]').forEach(el=>{
-        out.push({
-          tag: el.tagName,
-          href: el.getAttribute('href') || '',
-          onclick: (el.getAttribute('onclick')||'').slice(0,120),
-          data: JSON.stringify(Object.fromEntries([...el.attributes].filter(a=>a.name.startsWith('data-')).map(a=>[a.name,a.value]))).slice(0,150),
-          text: (el.textContent||'').trim().slice(0,60)
-        });
-      });
-      return out.slice(0,25);
-    """)
-    for h in hits:
-        print(h)
-
-    # 3) XPath 精準撳 SHOW MY SERVERS
-    for label in ["SHOW MY SERVERS", "SHOW ASSIGNED SERVERS"]:
+    # 撳入 server card(text=Serwer testowy,唔用 exact link text)
+    for selector in [
+        "xpath://p[contains(text(),'Serwer testowy')]",
+        "xpath://*[contains(text(),'Serwer testowy')]",
+        "css:p.hrkiAy",
+    ]:
         try:
-            el = sb.find_element(f"xpath://*[contains(normalize-space(text()),'{label}')]", timeout=5)
-            print(f"=== XPath 撳 {label} ===")
+            el = sb.find_element(selector, timeout=5)
+            print(f"=== 撳 {selector} ===")
             el.click()
-            sb.sleep(5)
+            sb.sleep(6)
             print("URL:", sb.get_current_url())
-            body = sb.get_text("body") or ""
-            for l in body.splitlines():
-                s = l.strip()
-                if s: print("  ", s[:180])
+            break
         except Exception as e:
-            print(f"XPath {label} fail:", str(e)[:100])
+            print(f"撳 {selector} fail: {str(e)[:80]}")
 
-    # 4) 連埋全部 a[href] 睇有冇 servers/xxx
-    print("=== 全部 a[href] ===")
-    hrefs = sb.execute_script(
-        "return Array.from(document.querySelectorAll('a[href]')).map(a=>a.getAttribute('href')).filter(h=>h);")
-    for h in sorted(set(hrefs)):
-        if 'server' in h.lower() or h.count('/') >= 2:
-            print("  ", h)
+    dump_body("撳入 server 後")
+    search_keywords("撳入 server 後")
+
+    # 撳 Server Settings
+    try:
+        el = sb.find_element("text=Server Settings", timeout=5)
+        print("=== 撳 Server Settings ===")
+        el.click()
+        sb.sleep(5)
+        dump_body("Server Settings")
+        search_keywords("Server Settings")
+    except Exception as e:
+        print("撳 Server Settings fail:", str(e)[:120])
 
     sb.save_screenshot("discover_screenshot.png")
