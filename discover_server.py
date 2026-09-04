@@ -26,27 +26,6 @@ def send_cookies(br):
             "secure": True,
         })
 
-def dump_body(tag):
-    print(f"=== {tag} body ===")
-    body = sb.get_text("body") or ""
-    for l in body.splitlines():
-        s = l.strip()
-        if s:
-            print("  ", s[:180])
-
-def search_keywords(tag):
-    print(f"=== {tag} 關鍵字掃描 ===")
-    src = sb.get_page_source()
-    for kw in ["dodaj", "add 6", "add6", "przedłuż", "przedluz", "extend", "renew",
-               "6 godzin", "6h", "godzin", "expiration", "expiry", "rok", "year"]:
-        for m in re.finditer(kw, src, re.IGNORECASE):
-            s = max(0, m.start()-60)
-            e = min(len(src), m.end()+60)
-            snippet = src[s:e].replace("\n", " ")
-            snippet = re.sub(r"<[^>]+>", " ", snippet)
-            print(f"  [{kw}] ...{snippet.strip()[:130]}...")
-            break
-
 with SB(uc=True, xvfb=True) as sb:
     sb.uc_open_with_reconnect("https://dash.icehost.pl/", reconnect_time=8)
     sb.sleep(6)
@@ -54,37 +33,54 @@ with SB(uc=True, xvfb=True) as sb:
     sb.refresh()
     sb.sleep(8)
 
-    dump_body("首頁")
-    search_keywords("首頁")
+    # JS 直接撳 #list 內嘅 server card(揾含「Serwer」嘅 p 卡)
+    clicked = sb.execute_script("""
+      const list = document.getElementById('list');
+      if (!list) return 'NO_LIST';
+      const p = Array.from(list.querySelectorAll('p')).find(x => x.textContent.includes('Serwer'));
+      if (!p) return 'NO_SERVER_P';
+      // 向上搵可點擊祖先(article/div/a)
+      let el = p;
+      for (let i=0; i<4; i++) { el = el.parentElement; if (!el) break; }
+      el.click();
+      return 'CLICKED:' + el.tagName + '.' + (el.className||'').toString().slice(0,60);
+    """)
+    print("JS CLICK:", clicked)
+    sb.sleep(7)
 
-    # 撳入 server card(text=Serwer testowy,唔用 exact link text)
-    for selector in [
-        "xpath://p[contains(text(),'Serwer testowy')]",
-        "xpath://*[contains(text(),'Serwer testowy')]",
-        "css:p.hrkiAy",
-    ]:
-        try:
-            el = sb.find_element(selector, timeout=5)
-            print(f"=== 撳 {selector} ===")
-            el.click()
-            sb.sleep(6)
-            print("URL:", sb.get_current_url())
-            break
-        except Exception as e:
-            print(f"撳 {selector} fail: {str(e)[:80]}")
+    print("URL:", sb.get_current_url())
+    src = sb.get_page_source()
+    print("HTML 長度:", len(src))
 
-    dump_body("撳入 server 後")
-    search_keywords("撳入 server 後")
+    # 完整 body
+    print("=== body ===")
+    body = sb.get_text("body") or ""
+    for l in body.splitlines():
+        s = l.strip()
+        if s:
+            print("  ", s[:180])
 
-    # 撳 Server Settings
-    try:
-        el = sb.find_element("text=Server Settings", timeout=5)
-        print("=== 撳 Server Settings ===")
-        el.click()
-        sb.sleep(5)
-        dump_body("Server Settings")
-        search_keywords("Server Settings")
-    except Exception as e:
-        print("撳 Server Settings fail:", str(e)[:120])
+    # 搜尋續期關鍵字
+    print("=== 續期關鍵字掃描 ===")
+    for kw in ["dodaj", "add 6", "add6", "przedłuż", "przedluz", "extend", "renew",
+               "6 godzin", "no expiration", "expiration", "godzin", "Konto", "plan"]:
+        ms = list(re.finditer(kw, src, re.IGNORECASE))
+        if ms:
+            m = ms[0]
+            s = max(0, m.start()-80); e = min(len(src), m.end()+80)
+            snippet = re.sub(r"<[^>]+>", " ", src[s:e]).strip()
+            print(f"  [{kw}] x{len(ms)}: ...{snippet[:150]}...")
+
+    # 按鈕/連結列表
+    print("=== buttons ===")
+    for b in sb.find_elements("button"):
+        t = (b.text or "").strip()
+        if t and len(t) < 100:
+            print("  BTN:", t)
+    print("=== 全部 a ===")
+    for a in sb.find_elements("a"):
+        t = (a.text or "").strip()
+        if t and len(t) < 80:
+            print("  A:", t)
 
     sb.save_screenshot("discover_screenshot.png")
