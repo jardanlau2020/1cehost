@@ -1,0 +1,45 @@
+name: IceHost Renew (直連試跑)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: ⚙ 設置 Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: 🛠️ 安裝依賴
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11-utils xdotool scrot fonts-noto-cjk
+          pip install seleniumbase requests
+          seleniumbase install chromedriver
+
+      - name: 📍 確認出口 IP
+        continue-on-error: true
+        run: |
+          echo "Runner 出口 IP: $(curl -s --max-time 15 https://api.ipify.org || echo n/a)"
+          curl -s --max-time 15 https://ipinfo.io/json || true
+
+      - name: 🔄 直連執行 IceHost 續期(唔掛 WARP/唔用代理)
+        env:
+          ICEHOST_SERVER_URL: ${{ secrets.ICEHOST_SERVER_URL }}
+          ICEHOST_COOKIES: ${{ secrets.ICEHOST_COOKIES }}
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 icehost_run.py
+
+      - name: 📸 上傳截圖
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: icehost-direct-renew
+          path: icehost_debug_screenshot.png
+          if-no-files-found: ignore
+          retention-days: 3
