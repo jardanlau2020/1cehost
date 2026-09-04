@@ -32,8 +32,6 @@ jobs:
         if: ${{ inputs.use_warp }}
         continue-on-error: true
         uses: fscarmen/warp-on-actions@v1.1
-        with:
-          stack: ipv4
 
       - name: 📍 確認出口 IP
         continue-on-error: true
