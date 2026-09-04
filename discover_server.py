@@ -33,64 +33,54 @@ with SB(uc=True, xvfb=True) as sb:
     sb.refresh()
     sb.sleep(8)
 
-    # 1) 挖 JS 函式源碼 — 睇 server URL pattern
-    print("=== JS 函式源碼 ===")
-    for fn in ["openConsole", "openFiles", "openSettings", "openConsole2", "Server"]:
-        try:
-            src = sb.execute_script(f"return typeof {fn} !== 'undefined' ? {fn}.toString().slice(0,600) : 'UNDEFINED';")
-            print(f"[{fn}] {src[:400]}")
-        except Exception as e:
-            print(f"[{fn}] ERR {str(e)[:80]}")
-
-    # 2) 搵 global 有冇 server id
-    print("=== global server 變數 ===")
-    g = sb.execute_script("""
-      const out = [];
-      for (const k of Object.keys(window)) {
-        if (/server|serv|id|panel|console/i.test(k) && k.length < 60) {
-          let v;
-          try { v = window[k]; } catch(e) { v = 'ERR'; }
-          if (v !== null && v !== undefined) {
-            let s = typeof v === 'string' ? v : JSON.stringify(v)?.slice(0,80);
-            if (s && String(s).length < 120) out.push(k + ' = ' + s);
-          }
-        }
-      }
-      return out.slice(0,40);
+    # 1) 挖 hidden button ids & 側邊欄 menu 結構
+    print("=== hidden button ids ===")
+    ids = sb.execute_script("""
+      const names = ['console','files','settings','startup','databases','version','backups','splits','schedules','users','subdomain','network'];
+      return names.map(n => {
+        const el = document.getElementById(n);
+        return el ? n + ' => ' + el.tagName + '.' + (el.className||'').toString().slice(0,50) + ' style=' + (el.getAttribute('style')||'') + ' type=' + (el.getAttribute('type')||'') + ' hidden=' + (el.hidden||'') : n + ' => MISSING';
+      });
     """)
-    for line in g:
-        print("  ", line)
+    for x in ids:
+        print("  ", x)
 
-    # 3) 撳 SHOW ASSIGNED SERVERS tab(JS 精準)
-    print("=== 撳 SHOW ASSIGNED SERVERS ===")
-    clicked = sb.execute_script("""
-      const nodes = Array.from(document.querySelectorAll('*'));
-      const el = nodes.find(n => n.childNodes.length && Array.from(n.childNodes).some(c => c.nodeType===3 && c.textContent.trim()==='SHOW ASSIGNED SERVERS'));
-      if (!el) return 'NOT_FOUND';
-      el.click(); return 'CLICKED ' + el.tagName + '.' + (el.className||'').toString().slice(0,50);
+    # 2) 撳側邊欄 menu: Servers 連結
+    print("=== 撳 Servers menu ===")
+    r = sb.execute_script("""
+      const a = Array.from(document.querySelectorAll('a,span,div')).find(x => x.textContent.trim() === 'Servers');
+      if (!a) return 'NOT_FOUND';
+      a.click(); return 'CLICKED ' + a.tagName + '.' + (a.className||'').toString().slice(0,60);
     """)
-    print(clicked)
+    print(r)
     sb.sleep(5)
     print("URL:", sb.get_current_url())
 
-    # 4) same-origin fetch 打 API(瀏覽器內,帶 cookie,WAF 已過)
-    print("=== in-page API fetch ===")
-    api_results = sb.execute_script("""
-      const paths = ['/api/servers','/api/user/servers','/api/client/servers','/api/freeservers','/api/v1/servers','/freeservers/list','/api/servers/list'];
-      return Promise.all(paths.map(async p => {
-        try {
-          const r = await fetch(p, {headers: {'X-Requested-With':'XMLHttpRequest', 'Accept':'application/json'}});
-          const t = await r.text();
-          return p + ' → ' + r.status + ' | ' + t.slice(0,300).replace(/\\n/g,' ');
-        } catch(e) { return p + ' → ERR ' + String(e).slice(0,100); }
-      }));
-    """)
-    for line in api_results:
-        print("  ", line[:350])
+    # 3) 直接試 SPA 路由(server console / settings / freeservers)
+    print("=== 試 SPA 路由 ===")
+    for path in ["/console", "/files", "/settings", "/server/1", "/servers/1",
+                 "/server/1/console", "/freeservers?tab=assigned", "/servers"]:
+        try:
+            sb.open("https://dash.icehost.pl" + path)
+            sb.sleep(3)
+            t = sb.get_page_title() or ""
+            bodytext = (sb.get_text("body") or "")[:120].replace("\n", " | ")
+            print(f"  {path} → title='{t}' body='{bodytext}'")
+        except Exception as e:
+            print(f"  {path} → ERR {str(e)[:80]}")
 
-    # 5) 挖 HTML 有冇 hidden server data / JSON state
-    print("=== 頁面內嵌 JSON/state ===")
-    for m in re.finditer(r'window\.__[A-Z_]+\s*=\s*([^<]{0,200})', sb.get_page_source()):
-        print("  __", m.group(0)[:220])
+    # 4) 挖 network performance entries 睇 API 呼叫
+    print("=== performance entries ===")
+    perf = sb.execute_script("""
+      return performance.getEntriesByType('resource').map(r => r.name).filter(n => !/\.(png|jpg|css|woff|svg|js\\?|fonts)/.test(n) && n.includes('icehost')).slice(-20);
+    """)
+    for p in perf:
+        print("  RES:", p)
+
+    # 5) 直接睇 main JS bundle 有冇 /api/ 字樣
+    print("=== 掃描 JS bundles API endpoints ===")
+    scripts = sb.execute_script("return Array.from(document.scripts).map(s=>s.src).filter(Boolean);")
+    for s in scripts:
+        print("  SCRIPT:", s[:120])
 
     sb.save_screenshot("discover_screenshot.png")
