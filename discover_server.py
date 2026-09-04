@@ -1,6 +1,7 @@
 import os
 import json
 import urllib.parse
+import re
 from seleniumbase import SB
 
 COOKIES = os.getenv("ICEHOST_COOKIES", "").strip()
@@ -10,9 +11,9 @@ if not COOKIES:
 
 with SB(uc=True, xvfb=True) as sb:
     sb.uc_open_with_reconnect("https://dash.icehost.pl/", reconnect_time=8)
-    sb.sleep(5)
+    sb.sleep(6)
 
-    # 注入 cookie(同 icehost_run.py 一樣嘅純文本邏輯)
+    # 注入 cookie
     token_value = COOKIES
     if "icehostpl_session=" in token_value:
         token_value = token_value.split("icehostpl_session=")[1].split(";")[0]
@@ -29,26 +30,53 @@ with SB(uc=True, xvfb=True) as sb:
             "secure": True,
         })
     sb.refresh()
-    sb.sleep(5)
+    sb.sleep(6)
 
-    # 所有指向 /servers/ 嘅連結(edit 頁通常有 id)
-    links = set()
-    for a in sb.find_elements("a[href*='/servers/']"):
-        href = a.get_attribute("href")
-        if href:
-            links.add(href)
-    for href in sorted(links):
-        print("LINK:", href)
-
-    # 頁面標題 + 當前 URL,判斷登入狀態
+    print("=== 基本信息 ===")
     print("TITLE:", sb.get_page_title() or "(none)")
     print("URL:", sb.get_current_url())
 
-    # 若只搵到一個 server link 就 print 結果
-    edit_urls = [l for l in links if "/edit" in l or "/servers/" in l]
-    if len(edit_urls) == 1:
-        print(f"DISCOVER_RESULT={edit_urls[0]}")
-    else:
-        print(f"DISCOVER_RESULT=MULTIPLE_OR_NONE ({len(edit_urls)})")
+    src = sb.get_page_source()
+    print("HTML 長度:", len(src))
+    print("有 logout 文字:", "logout" in src.lower() or "wyloguj" in src.lower())
+    print("有登入表單:", 'type="email"' in src or 'name="email"' in src or 'name="password"' in src)
+
+    # 搵所有 link
+    print("=== 全部 a[href] ===")
+    hrefs = set()
+    for a in sb.find_elements("a[href]"):
+        h = a.get_attribute("href")
+        if h and h.startswith("http"):
+            hrefs.add(h)
+        elif h and h.startswith("/"):
+            hrefs.add("https://dash.icehost.pl" + h)
+        elif h:
+            hrefs.add(h)
+    for h in sorted(hrefs):
+        print("  A:", h)
+
+    # 搵 form action
+    print("=== 全部 form ===")
+    for f in sb.find_elements("form"):
+        act = f.get_attribute("action")
+        print("  FORM action:", act)
+
+    # 搵含 server / host / renew / prolong / 6 嘅元素文字
+    print("=== 相關文字節點 ===")
+    body_text = sb.get_text("body") or ""
+    for kw in ["dodaj", "add", "prolong", "przedłuż", "przedluz", "server", "renew", "6 godzin", "6 hour", "servers"]:
+        matches = [l.strip() for l in body_text.splitlines() if kw.lower() in l.lower()]
+        for m in matches[:5]:
+            print(f"  [{kw}] {m[:120]}")
+
+    # 嘗試幾個常風路徑
+    print("=== 嘗試直接訪問候選路徑 ===")
+    for path in ["/servers", "/server", "/home", "/panel", "/dashboard", "/servers/"]:
+        try:
+            sb.open("https://dash.icehost.pl" + path)
+            sb.sleep(3)
+            print(f"  GET {path} → {sb.get_current_url()[:100]} | title={sb.get_page_title()[:60]}")
+        except Exception as e:
+            print(f"  GET {path} → ERR {str(e)[:80]}")
 
     sb.save_screenshot("discover_screenshot.png")
