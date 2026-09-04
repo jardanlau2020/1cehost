@@ -13,7 +13,6 @@ with SB(uc=True, xvfb=True) as sb:
     sb.uc_open_with_reconnect("https://dash.icehost.pl/", reconnect_time=8)
     sb.sleep(6)
 
-    # 注入 cookie
     token_value = COOKIES
     if "icehostpl_session=" in token_value:
         token_value = token_value.split("icehostpl_session=")[1].split(";")[0]
@@ -32,51 +31,44 @@ with SB(uc=True, xvfb=True) as sb:
     sb.refresh()
     sb.sleep(6)
 
-    print("=== 基本信息 ===")
-    print("TITLE:", sb.get_page_title() or "(none)")
-    print("URL:", sb.get_current_url())
+    def dump_links(tag):
+        print(f"=== dump {tag} ===")
+        hrefs = set()
+        for a in sb.find_elements("a[href]"):
+            h = a.get_attribute("href")
+            if h and h.startswith("/"):
+                hrefs.add("https://dash.icehost.pl" + h)
+            elif h and h.startswith("http"):
+                hrefs.add(h)
+        for h in sorted(hrefs):
+            print(f"  A: {h}")
+        # buttons / 疑似 server 卡片
+        for el in sb.find_elements("button"):
+            t = (el.text or "").strip()
+            if t:
+                print(f"  BTN: {t[:80]}")
 
-    src = sb.get_page_source()
-    print("HTML 長度:", len(src))
-    print("有 logout 文字:", "logout" in src.lower() or "wyloguj" in src.lower())
-    print("有登入表單:", 'type="email"' in src or 'name="email"' in src or 'name="password"' in src)
+    # 訪問 freeservers
+    try:
+        sb.open("https://dash.icehost.pl/freeservers")
+        sb.sleep(6)
+        print("FREESERVERS URL:", sb.get_current_url())
+        dump_links("freeservers")
+        body = sb.get_text("body") or ""
+        print("=== freeservers 全文(短) ===")
+        for l in body.splitlines()[:60]:
+            if l.strip():
+                print("  ", l.strip()[:150])
+    except Exception as e:
+        print("freeservers ERR:", str(e)[:200])
 
-    # 搵所有 link
-    print("=== 全部 a[href] ===")
-    hrefs = set()
-    for a in sb.find_elements("a[href]"):
-        h = a.get_attribute("href")
-        if h and h.startswith("http"):
-            hrefs.add(h)
-        elif h and h.startswith("/"):
-            hrefs.add("https://dash.icehost.pl" + h)
-        elif h:
-            hrefs.add(h)
-    for h in sorted(hrefs):
-        print("  A:", h)
-
-    # 搵 form action
-    print("=== 全部 form ===")
-    for f in sb.find_elements("form"):
-        act = f.get_attribute("action")
-        print("  FORM action:", act)
-
-    # 搵含 server / host / renew / prolong / 6 嘅元素文字
-    print("=== 相關文字節點 ===")
-    body_text = sb.get_text("body") or ""
-    for kw in ["dodaj", "add", "prolong", "przedłuż", "przedluz", "server", "renew", "6 godzin", "6 hour", "servers"]:
-        matches = [l.strip() for l in body_text.splitlines() if kw.lower() in l.lower()]
-        for m in matches[:5]:
-            print(f"  [{kw}] {m[:120]}")
-
-    # 嘗試幾個常風路徑
-    print("=== 嘗試直接訪問候選路徑 ===")
-    for path in ["/servers", "/server", "/home", "/panel", "/dashboard", "/servers/"]:
-        try:
-            sb.open("https://dash.icehost.pl" + path)
-            sb.sleep(3)
-            print(f"  GET {path} → {sb.get_current_url()[:100]} | title={sb.get_page_title()[:60]}")
-        except Exception as e:
-            print(f"  GET {path} → ERR {str(e)[:80]}")
+    # 訪問 account
+    try:
+        sb.open("https://dash.icehost.pl/account")
+        sb.sleep(5)
+        print("ACCOUNT URL:", sb.get_current_url())
+        dump_links("account")
+    except Exception as e:
+        print("account ERR:", str(e)[:200])
 
     sb.save_screenshot("discover_screenshot.png")
