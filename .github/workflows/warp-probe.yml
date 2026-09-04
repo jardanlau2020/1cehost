@@ -1,0 +1,82 @@
+name: IceHost-Warp-Probe
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11-utils xdotool scrot fonts-noto-cjk
+          pip install seleniumbase requests
+          seleniumbase install chromedriver
+
+      - name: WARP via wgcf + wireproxy (SOCKS5 127.0.0.1:10808)
+        continue-on-error: true
+        run: |
+          set -e
+          cd /tmp
+          curl -sSL -o wgcf "https://github.com/ViRb3/wgcf/releases/latest/download/wgcf_2.2.28_linux_amd64"
+          chmod +x wgcf
+          echo | ./wgcf register --accept-tos || true
+          ./wgcf generate || true
+          PRIV=$(grep -A1 '^\[Interface\]' wgcf-profile.conf | grep PrivateKey | sed 's/.*= //')
+          PEER=$(grep -A3 '^\[Peer\]' wgcf-profile.conf | grep PublicKey | sed 's/.*= //')
+          ENDP=$(grep -A3 '^\[Peer\]' wgcf-profile.conf | grep Endpoint | sed 's/.*= //')
+          echo "PRIV=${PRIV:0:6}... PEER=${PEER:0:6}... ENDP=$ENDP"
+          curl -sSL -o wp.tar.gz "https://github.com/pufferffish/wireproxy/releases/latest/download/wireproxy_linux_amd64.tar.gz"
+          tar xzf wp.tar.gz
+          ls -la wireproxy >/dev/null 2>&1 || ls -la
+          cat > /tmp/wp.conf <<EOF
+[Interface]
+PrivateKey = $PRIV
+Address = 172.16.0.2/32, fd01:5ca1:ab1e:823e:e094::8888/128
+DNS = 1.1.1.1
+
+[Socks5]
+BindAddress = 127.0.0.1:10808
+
+[Peer]
+PublicKey = $PEER
+Endpoint = $ENDP
+PersistentKeepalive = 25
+AllowedIPs = 0.0.0.0/0, ::/0
+EOF
+          nohup /tmp/wireproxy -c /tmp/wp.conf > /tmp/wireproxy.log 2>&1 &
+          sleep 4
+          cat /tmp/wireproxy.log || true
+          curl -s --max-time 15 -x socks5h://127.0.0.1:10808 https://api.ipify.org || echo "SOCKS5 唔通"
+
+      - name: WARP exit IP
+        continue-on-error: true
+        run: |
+          echo "WARP IP: $(curl -s --max-time 15 -x socks5h://127.0.0.1:10808 https://api.ipify.org || echo n/a)"
+          curl -s --max-time 15 -x socks5h://127.0.0.1:10808 https://ipinfo.io/json || true
+
+      - name: Probe (via WARP socks5)
+        continue-on-error: true
+        env:
+          PROBE_URL: https://dash.icehost.pl/
+          PROBE_PROXY: socks5://127.0.0.1:10808
+        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 probe.py
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: icehost-warp-probe
+          path: probe_*.png
+          if-no-files-found: ignore
+          retention-days: 3
