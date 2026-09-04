@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       use_warp:
-        description: '用 Cloudflare WARP 換出口 IP'
+        description: '用 Cloudflare WARP 換出口 IP（系統級全局）'
         type: boolean
         default: true
 
@@ -28,25 +28,22 @@ jobs:
           pip install seleniumbase requests
           seleniumbase install chromedriver
 
-      - name: 🌍 掛 Cloudflare WARP（換出口 IP）
+      - name: 🌍 掛 Cloudflare WARP（系統級全局，唔係 socks）
         if: ${{ inputs.use_warp }}
         continue-on-error: true
         uses: fscarmen/warp-on-actions@v1.1
         with:
-          mode: wireproxy
+          stack: ipv4
 
-      - name: 📍 WARP 後出口 IP
-        if: ${{ inputs.use_warp }}
+      - name: 📍 確認出口 IP
         continue-on-error: true
         run: |
-          echo "直連 IP  : $(curl -s --max-time 15 https://api.ipify.org || echo 'n/a')"
-          echo "WARP IP  : $(curl -s --max-time 15 -x socks5h://127.0.0.1:40000 https://api.ipify.org || echo 'n/a')"
-          curl -s --max-time 15 -x socks5h://127.0.0.1:40000 https://ipinfo.io/json || true
+          echo "出口 IP: $(curl -s4 --max-time 15 https://api.ipify.org || echo n/a)"
+          curl -s4 --max-time 15 https://ipinfo.io/json || true
 
-      - name: 🔍 探路
+      - name: 🔍 探路（WARP 生效後係全局，唔設 PROBE_PROXY）
         env:
           PROBE_URL: https://dash.icehost.pl/
-          PROBE_PROXY: ${{ inputs.use_warp && 'socks5://127.0.0.1:40000' || '' }}
         run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 probe.py
 
       - name: 📸 上傳截圖
