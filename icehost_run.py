@@ -157,17 +157,33 @@ def run():
 
         # 4. 判断登录状态
         current_url = sb.get_current_url()
-        # 判断是否停留在登录页
-        if "login" in current_url or sb.is_element_visible(
-            "input[type='email']"
-        ):
+        page_src_login = sb.get_page_source()
+        # 多重判据：URL、登入表单、页面文字；任一命中即视为 cookie 失效
+        login_markers = [
+            "Zaloguj", "Logowanie", "Sign in", "Log in",
+            "Remember me", "Zapamiętaj mnie", "Forgot password",
+        ]
+        cookie_dead = (
+            "login" in current_url
+            or sb.is_element_visible("input[type='email']")
+            or sb.is_element_visible("input[type='password']")
+            or any(m in page_src_login for m in login_markers)
+        )
+        if cookie_dead:
             msg = (
-                "❌ <b>IceHost 登录失效！</b>\n请在浏览器重新提取并更新"
-                " ICEHOST_COOKIES。"
+                "🔁 <b>IceHost Cookie 已失效,需要更換!</b>\n\n"
+                "自動續期已停止,因為 <code>icehostpl_session</code> 過期或被後台踢出。\n\n"
+                "<b>請照做:</b>\n"
+                "1. 用瀏覽器登入 dash.icehost.pl\n"
+                "2. F12 → Application → Cookies → 複製 <code>icehostpl_session</code> 全值\n"
+                "3. 貼返俾晴天更新 <code>ICEHOST_COOKIES</code>\n\n"
+                f"⏰ 偵測時間: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"🔗 當前 URL: {current_url[:80]}"
             )
-            print(msg)
+            print("❌ Cookie 已失效,已發 TG 通知要求更換。")
             send_tg_notification(msg, "icehost_debug_screenshot.png")
             return
+        print("✅ Cookie 有效,登入狀態正常。")
 
         # 5. 判定波兰语与英语红框限制
         page_source = sb.get_page_source()
@@ -249,8 +265,9 @@ def run():
 
             if _confirmed:
                 msg = (
-                    f"⚡ <b>IceHost 服务器续期成功！</b>\n"
-                    f"到期时间已由 {_old_exp} 延长至 {_new_exp}（+6 小时）。"
+                    f"⚡ <b>IceHost 續期成功!</b>\n\n"
+                    f"到期時間: {_old_exp} → <b>{_new_exp}</b>(+6 小時)\n"
+                    f"⏰ 執行時間: {time.strftime('%Y-%m-%d %H:%M:%S')}"
                 )
                 print(msg)
                 send_tg_notification(msg, "icehost_debug_screenshot.png")
@@ -258,18 +275,34 @@ def run():
                 print(
                     "刷新后检测到限制提示：说明未到可续期时间。本次未完成续期。"
                 )
+            elif _old_exp and _new_exp and _old_exp == _new_exp:
+                msg = (
+                    f"⚠️ <b>IceHost 續期未生效</b>\n\n"
+                    f"已撳過續期掣,但到期時間冇變({_new_exp})。\n"
+                    f"可能未到可續期窗口,或後端拒絕。請睇截圖。\n"
+                    f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+                print(msg)
+                send_tg_notification(msg, "icehost_debug_screenshot.png")
             else:
                 msg = (
-                    "ℹ️ <b>IceHost 续期指令已发送</b>\n"
-                    "按钮已点击，但未能读取到期时间作对比，请查看下方截图确认是否成功。"
+                    f"ℹ️ <b>IceHost 續期指令已發送</b>\n\n"
+                    f"續期前: {_old_exp or '讀唔到'}\n"
+                    f"續期後: {_new_exp or '讀唔到'}\n"
+                    f"未能完成時間對比,請睇截圖確認。\n"
+                    f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}"
                 )
                 print(msg)
                 send_tg_notification(msg, "icehost_debug_screenshot.png")
 
         except Exception as e:
             error_msg = (
-                "❌ <b>IceHost"
-                " 续期异常！</b>\n未找到续期按钮，可能是网页加载失败、被限制或按钮文本有变，请查看截图。"
+                f"❌ <b>IceHost 續期異常!</b>\n\n"
+                f"搵唔到續期掣(ADD 6 HOURS VALIDITY),可能原因:\n"
+                f"• 網頁載入失敗或被 WAF 擋\n"
+                f"• 未到可續期窗口(掣被隱藏)\n"
+                f"• 掣文字有變\n\n"
+                f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}"
             )
             print(f"未在页面中找到可用的续期按钮: {e}")
             send_tg_notification(error_msg, "icehost_debug_screenshot.png")

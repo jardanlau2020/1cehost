@@ -1,7 +1,11 @@
-name: IceHost Renew (直連試跑)
+name: IceHost Renew
 
 on:
   workflow_dispatch:
+  schedule:
+    # 每 5 小時跑一次(免費機每 6 小時到期,留 1 小時緩衝)
+    # UTC 時間,對應北京時間 +8
+    - cron: '0 */5 * * *'
 
 jobs:
   renew:
@@ -33,6 +37,8 @@ jobs:
         env:
           ICEHOST_SERVER_URL: ${{ secrets.ICEHOST_SERVER_URL }}
           ICEHOST_COOKIES: ${{ secrets.ICEHOST_COOKIES }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 icehost_run.py
 
       - name: 📸 上傳截圖
