@@ -188,12 +188,20 @@ def run():
             )
             return
 
-        # 6. 安全寻找并点击续期按钮
-        renew_btn_selector = "//*[not(*) and (contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'dodaj 6') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add 6'))]"
+        # 6. 安全寻找并点击续期按钮（兼容 ADD 6 HOURS VALIDITY / Dodaj 6 godzin / add 6）
+        renew_btn_selector = "//*[not(*) and (contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add 6 hours') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'dodaj 6') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add 6'))]"
 
         try:
             print("正在等待续期按钮加载...")
             sb.wait_for_element_visible(renew_btn_selector, timeout=15)
+
+            # 读取续期前到期时间（EXPIRATION DATE），供续期后对比
+            import re as _re
+            _src0 = sb.get_page_source()
+            _m0 = _re.search(r'(EXPIRATION DATE|Data wygaśnięcia|到期日|expiry)[^0-9]{0,40}([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2})', _src0, _re.I | _re.S)
+            _old_exp = _m0.group(2) if _m0 else None
+            print(f"续期前 EXPIRATION DATE: {_old_exp}")
+
             print("未检测到限制提示，找到续期按钮，正在点击...")
             sb.click(renew_btn_selector)
 
@@ -221,17 +229,39 @@ def run():
             updated_source = sb.get_page_source()
             is_now_limited = any(kw in updated_source for kw in keywords)
 
-            if is_now_limited:
+            # 读取续期后到期时间并对比，确认真正延长约6小时
+            _m1 = _re.search(r'(EXPIRATION DATE|Data wygaśnięcia|到期日|expiry)[^0-9]{0,40}([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2})', updated_source, _re.I | _re.S)
+            _new_exp = _m1.group(2) if _m1 else None
+            print(f"续期后 EXPIRATION DATE: {_new_exp}")
+
+            def _parse_ts(s):
+                try:
+                    return int(_re.sub(r'[^0-9]', '', s))
+                except Exception:
+                    return None
+
+            _confirmed = False
+            if _old_exp and _new_exp:
+                _d = _parse_ts(_new_exp) - _parse_ts(_old_exp)
+                # 差约 5~7 小时 = 成功（正常加6小时）；允许 5~9 小时容差
+                if _d is not None and 5000 <= _d <= 60000:
+                    _confirmed = True
+
+            if _confirmed:
                 msg = (
-                    "⚡ <b>IceHost"
-                    " 服务器续期成功！</b>\n服务器已真正成功延长 6"
-                    " 小时有效期。"
+                    f"⚡ <b>IceHost 服务器续期成功！</b>\n"
+                    f"到期时间已由 {_old_exp} 延长至 {_new_exp}（+6 小时）。"
                 )
                 print(msg)
                 send_tg_notification(msg, "icehost_debug_screenshot.png")
+            elif is_now_limited:
+                print(
+                    "刷新后检测到限制提示：说明未到可续期时间。本次未完成续期。"
+                )
             else:
                 msg = (
-                    "ℹ️ <b>IceHost 续期指令已发送</b>\n按钮已点击，请检查下方截图确认是否成功。"
+                    "ℹ️ <b>IceHost 续期指令已发送</b>\n"
+                    "按钮已点击，但未能读取到期时间作对比，请查看下方截图确认是否成功。"
                 )
                 print(msg)
                 send_tg_notification(msg, "icehost_debug_screenshot.png")
