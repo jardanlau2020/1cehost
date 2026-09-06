@@ -8,6 +8,7 @@ from seleniumbase import SB
 
 SERVER_URL = os.getenv("ICEHOST_SERVER_URL")
 ICEHOST_COOKIES = os.getenv("ICEHOST_COOKIES")
+ACCOUNT_NAME = os.getenv("ICEHOST_ACCOUNT_NAME", "IceHost")
 
 
 def send_tg_notification(message, photo_path=None):
@@ -171,7 +172,7 @@ def run():
         )
         if cookie_dead:
             msg = (
-                "🔁 <b>IceHost Cookie 已失效,需要更換!</b>\n\n"
+                f"🔁 <b>{ACCOUNT_NAME} Cookie 已失效,需要更換!</b>\n\n"
                 "自動續期已停止,因為 <code>icehostpl_session</code> 過期或被後台踢出。\n\n"
                 "<b>請照做:</b>\n"
                 "1. 用瀏覽器登入 dash.icehost.pl\n"
@@ -265,7 +266,7 @@ def run():
 
             if _confirmed:
                 msg = (
-                    f"⚡ <b>IceHost 續期成功!</b>\n\n"
+                    f"⚡ <b>{ACCOUNT_NAME} 續期成功!</b>\n\n"
                     f"到期時間: {_old_exp} → <b>{_new_exp}</b>(+6 小時)\n"
                     f"⏰ 執行時間: {time.strftime('%Y-%m-%d %H:%M:%S')}"
                 )
@@ -277,7 +278,7 @@ def run():
                 )
             elif _old_exp and _new_exp and _old_exp == _new_exp:
                 msg = (
-                    f"⚠️ <b>IceHost 續期未生效</b>\n\n"
+                    f"⚠️ <b>{ACCOUNT_NAME} 續期未生效</b>\n\n"
                     f"已撳過續期掣,但到期時間冇變({_new_exp})。\n"
                     f"可能未到可續期窗口,或後端拒絕。請睇截圖。\n"
                     f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}"
@@ -286,7 +287,7 @@ def run():
                 send_tg_notification(msg, "icehost_debug_screenshot.png")
             else:
                 msg = (
-                    f"ℹ️ <b>IceHost 續期指令已發送</b>\n\n"
+                    f"ℹ️ <b>{ACCOUNT_NAME} 續期指令已發送</b>\n\n"
                     f"續期前: {_old_exp or '讀唔到'}\n"
                     f"續期後: {_new_exp or '讀唔到'}\n"
                     f"未能完成時間對比,請睇截圖確認。\n"
@@ -297,7 +298,7 @@ def run():
 
         except Exception as e:
             error_msg = (
-                f"❌ <b>IceHost 續期異常!</b>\n\n"
+                f"❌ <b>{ACCOUNT_NAME} 續期異常!</b>\n\n"
                 f"搵唔到續期掣(ADD 6 HOURS VALIDITY),可能原因:\n"
                 f"• 網頁載入失敗或被 WAF 擋\n"
                 f"• 未到可續期窗口(掣被隱藏)\n"

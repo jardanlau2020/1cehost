@@ -9,8 +9,13 @@ on:
 
 jobs:
   renew:
+    name: IceHost ${{ matrix.account }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        account: ["01", "02"]
 
     steps:
       - uses: actions/checkout@v6
@@ -35,8 +40,9 @@ jobs:
 
       - name: 🔄 直連執行 IceHost 續期(唔掛 WARP/唔用代理)
         env:
-          ICEHOST_SERVER_URL: ${{ secrets.ICEHOST_SERVER_URL }}
-          ICEHOST_COOKIES: ${{ secrets.ICEHOST_COOKIES }}
+          ICEHOST_ACCOUNT_NAME: ${{ matrix.account == '01' && 'IceHost 01' || 'IceHost 02' }}
+          ICEHOST_SERVER_URL: ${{ matrix.account == '01' && secrets.ICEHOST_SERVER_URL || secrets.ICEHOST_SERVER_URL_02 }}
+          ICEHOST_COOKIES: ${{ matrix.account == '01' && secrets.ICEHOST_COOKIES || secrets.ICEHOST_COOKIES_02 }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 icehost_run.py
@@ -45,7 +51,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: icehost-direct-renew
+          name: icehost-direct-renew-${{ matrix.account }}
           path: icehost_debug_screenshot.png
           if-no-files-found: ignore
           retention-days: 3
