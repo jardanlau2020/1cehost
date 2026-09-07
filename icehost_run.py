@@ -9,6 +9,7 @@ from seleniumbase import SB
 SERVER_URL = os.getenv("ICEHOST_SERVER_URL")
 ICEHOST_COOKIES = os.getenv("ICEHOST_COOKIES")
 ACCOUNT_NAME = os.getenv("ICEHOST_ACCOUNT_NAME", "IceHost")
+PROXY_SERVER = os.getenv("PROXY_SERVER", "")
 
 
 def send_tg_notification(message, photo_path=None):
@@ -62,9 +63,12 @@ def run():
         raise SystemExit(2)
 
     # 1. 启动 SeleniumBase 并开启 UC 免密/防检测模式与 Xvfb 虚拟桌面 (xvfb=True)
-    with SB(uc=True, xvfb=True) as sb:
+    proxy_arg = None
+    if PROXY_SERVER:
+        print(f"使用代理: {PROXY_SERVER}")
+        proxy_arg = PROXY_SERVER
+    with SB(uc=True, xvfb=True, proxy=proxy_arg) as sb:
         print(f"正在访问 IceHost 面板: {SERVER_URL}")
-        # 使用 UC 专属重连模式访问，能极大缓解首屏 Cloudflare 阻断
         sb.uc_open_with_reconnect(SERVER_URL, reconnect_time=8)
         sb.sleep(5)
 

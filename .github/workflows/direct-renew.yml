@@ -38,14 +38,29 @@ jobs:
           echo "Runner 出口 IP: $(curl -s --max-time 15 https://api.ipify.org || echo n/a)"
           curl -s --max-time 15 https://ipinfo.io/json || true
 
-      - name: 🔄 直連執行 IceHost 續期(唔掛 WARP/唔用代理)
+      - name: ⚙ 设置代理 (sing-box, 可选)
+        continue-on-error: true
+        env:
+          NODE_LINK: ${{ secrets.NODE_LINK }}
+        run: |
+          bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
+
+      - name: 🔄 執行 IceHost 續期(proxy 可用時經代理)
         env:
           ICEHOST_ACCOUNT_NAME: ${{ matrix.account == '01' && 'IceHost 01' || 'IceHost 02' }}
           ICEHOST_SERVER_URL: ${{ matrix.account == '01' && secrets.ICEHOST_SERVER_URL || secrets.ICEHOST_SERVER_URL_02 }}
           ICEHOST_COOKIES: ${{ matrix.account == '01' && secrets.ICEHOST_COOKIES || secrets.ICEHOST_COOKIES_02 }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-        run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 icehost_run.py
+        run: |
+          if pgrep -f sing-box >/dev/null 2>&1; then
+            export PROXY_SERVER="socks5://127.0.0.1:1080"
+            echo "using proxy: socks5://127.0.0.1:1080"
+          else
+            export PROXY_SERVER=""
+            echo "no proxy, direct mode"
+          fi
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 icehost_run.py
 
       - name: 📸 上傳截圖
         if: always()
