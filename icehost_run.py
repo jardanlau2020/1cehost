@@ -176,16 +176,35 @@ def run():
             # 新增:Cookie 失效時,若已配置賬戶密碼,自動轉密碼登入
             if ICEHOST_EMAIL and ICEHOST_PASSWORD:
                 print("Cookie 失效,嘗試用賬戶密碼登入...")
-                login_url = "https://dash.icehost.pl/auth/login"
-                sb.uc_open_with_reconnect(login_url, reconnect_time=8)
-                sb.sleep(5)
+                # 若當前頁面已是登入頁(URL 含 login)就原地填寫,否則才導航
+                if "login" not in sb.get_current_url():
+                    sb.uc_open_with_reconnect("https://dash.icehost.pl/auth/login", reconnect_time=8)
+                    sb.sleep(5)
+                else:
+                    print("當前已在登入頁,原地填寫。")
                 try:
                     sb.uc_gui_click_captcha()
                     sb.sleep(10)
                 except Exception as e:
                     print(f"登入頁驗證盾處理異常(可忽略): {e}")
                 try:
-                    sb.update_text("input[type='email']", ICEHOST_EMAIL)
+                    email_locators = [
+                        "input[type='email']",
+                        "input[name='identification']",
+                        "input[name='email']",
+                        "input[placeholder*='mail' i]",
+                    ]
+                    filled_email = False
+                    for loc in email_locators:
+                        try:
+                            sb.update_text(loc, ICEHOST_EMAIL)
+                            print(f"email 欄已填({loc})。")
+                            filled_email = True
+                            break
+                        except Exception:
+                            continue
+                    if not filled_email:
+                        print("⚠️ 找不到 email 輸入欄,僅填密碼(可能失敗)。")
                     sb.update_text("input[type='password']", ICEHOST_PASSWORD)
                     sb.sleep(2)
                     sb.click('button[type="submit"]')
