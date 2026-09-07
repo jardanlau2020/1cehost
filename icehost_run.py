@@ -189,8 +189,13 @@ def run():
                     print("已移除死 session/XSRF cookies(保留 WAF/CF cookies)。")
                 except Exception as e:
                     print(f"移除 cookies 異常: {e}")
-                sb.uc_open_with_reconnect("https://dash.icehost.pl/auth/login", reconnect_time=8)
-                sb.sleep(8)
+                # 用原頁 refresh 而唔係新導航: 新導航 /auth/login 會被 WAF 判做
+                # 新訪客直接 "IceHost - Block"(Run 34152836486 實測), refresh 有機會過
+                try:
+                    sb.refresh()
+                    sb.sleep(10)
+                except Exception as e:
+                    print(f"refresh 異常: {e}")
                 # 確認登入表單真係渲染咗,否則 dump 頁面狀態即失敗(唔好喺空页面盲填)
                 pw_visible = False
                 for _attempt in range(3):
