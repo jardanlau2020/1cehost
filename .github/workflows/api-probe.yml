@@ -1,0 +1,26 @@
+name: IceHost API Probe
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [icehost-api-probe]
+
+jobs:
+  probe:
+    name: IceHost API Probe ${{ matrix.account }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        account: ["01", "02"]
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: 🔍 探测 Client API (只读)
+        env:
+          ICEHOST_API_BASE: https://dash.icehost.pl
+          ICEHOST_API_TOKEN: ${{ matrix.account == '01' && secrets.ICEHOST_API_TOKEN || secrets.ICEHOST_API_TOKEN_02 }}
+          ICEHOST_ACCOUNT_NAME: IceHost ${{ matrix.account }}
+        run: python3 scripts/api_probe.py
