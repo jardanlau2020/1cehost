@@ -188,6 +188,31 @@ def run():
                     print(f"清除 cookies 異常: {e}")
                 sb.uc_open_with_reconnect("https://dash.icehost.pl/auth/login", reconnect_time=8)
                 sb.sleep(8)
+                # 確認登入表單真係渲染咗,否則 dump 頁面狀態即失敗(唔好喺空页面盲填)
+                pw_visible = False
+                for _attempt in range(3):
+                    try:
+                        sb.wait_for_element_visible("input[type='password']", timeout=10)
+                        pw_visible = True
+                        break
+                    except Exception:
+                        sb.sleep(5)
+                if not pw_visible:
+                    _url = sb.get_current_url()
+                    _src = sb.get_page_source()
+                    print(f"登入表單未顯示。URL: {_url}")
+                    print("=== PAGE SOURCE DUMP ===")
+                    print(_src[:2500])
+                    print("=== END PAGE SOURCE ===")
+                    sb.save_screenshot("icehost_debug_screenshot.png")
+                    send_tg_notification(
+                        f"❌ <b>{ACCOUNT_NAME} 登入頁異常</b>\n\n"
+                        "清除 cookie 後重新載入登入頁,但表單冇渲染出嚟"
+                        "(可能係 Cloudflare 盾/頁面結構變動)。請睇截圖。\n\n"
+                        f"🔗 URL: {_url[:100]}\n"
+                        f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                        "icehost_debug_screenshot.png")
+                    raise SystemExit(3)
                 try:
                     sb.uc_gui_click_captcha()
                     sb.sleep(10)
@@ -214,7 +239,7 @@ def run():
                         # 通用 fallback: 搵第一個可见嘅非 password/checkbox/radio/hidden input
                         try:
                             print("通用 fallback: 列出所有 input...")
-                            for el in sb.get_elements("input"):
+                            for el in sb.find_elements("input"):
                                 _t = (el.get_attribute("type") or "text").lower()
                                 if _t in ("password", "checkbox", "radio", "hidden", "submit", "button", "file"):
                                     continue
