@@ -81,7 +81,12 @@ def run():
                         cookies_to_add = raw_data
                     elif isinstance(raw_data, dict):
                         cookies_to_add = raw_data.get("cookies", [])
-                    print("检测到 JSON 格式 Cookie，正在解析...")
+                    required = {"icehostpl_session", "XSRF-TOKEN"}
+                    present = {str(c.get("name")) for c in cookies_to_add if isinstance(c, dict)}
+                    if not required.issubset(present):
+                        missing = ", ".join(sorted(required - present))
+                        raise ValueError(f"JSON Cookie 缺少: {missing}")
+                    print("检测到 JSON 格式 Cookie，正在解析（session/XSRF 已核对）...")
 
                 # 尝试二：如果解析失败，解析 Cookie header / KEY=value 文本
                 except json.JSONDecodeError:
@@ -128,7 +133,8 @@ def run():
                 sb.refresh()
                 sb.sleep(5)
             except Exception as e:
-                print(f"注入 Cookie 过程中发生异常，跳过: {e}")
+                print(f"注入 Cookie 过程中发生异常: {e}")
+                raise SystemExit(2)
 
         # 3. 核心过盾：自动寻找并执行系统级物理点击过 Cloudflare Turnstile 验证盾
         sb.save_screenshot("icehost_debug_screenshot.png")
