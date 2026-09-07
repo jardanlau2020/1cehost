@@ -188,10 +188,21 @@ def run():
                 except Exception as e:
                     print(f"登入頁驗證盾處理異常(可忽略): {e}")
                 try:
+                    # 登入頁 DOM 轉儲:方便下次直接照實測 selector 改
+                    try:
+                        import re as _re2
+                        _form_src = sb.get_page_source()
+                        _mform = _re2.search(r'<form.*?</form>', _form_src, _re2.S | _re2.I)
+                        print("=== LOGIN FORM HTML ===")
+                        print(_mform.group(0)[:4000] if _mform else "NO FORM FOUND")
+                        print("=== END LOGIN FORM ===")
+                    except Exception as _e:
+                        print(f"form dump failed: {_e}")
                     email_locators = [
                         "input[type='email']",
                         "input[name='identification']",
                         "input[name='email']",
+                        "input[type='text']",
                         "input[placeholder*='mail' i]",
                     ]
                     filled_email = False
@@ -204,10 +215,34 @@ def run():
                         except Exception:
                             continue
                     if not filled_email:
+                        # 通用 fallback: 搵第一個可见嘅非 password/checkbox/radio/hidden input
+                        try:
+                            print("通用 fallback: 列出所有 input...")
+                            for el in sb.get_elements("input"):
+                                _t = (el.get_attribute("type") or "text").lower()
+                                if _t in ("password", "checkbox", "radio", "hidden", "submit", "button", "file"):
+                                    continue
+                                _nm = (el.get_attribute("name") or "")
+                                _ph = (el.get_attribute("placeholder") or "")
+                                print(f"  候選 input: name={_nm!r} type={_t} placeholder={_ph!r}")
+                                sb.update_text(el, ICEHOST_EMAIL)
+                                print(f"已填 email 入通用 input(name={_nm!r})。")
+                                filled_email = True
+                                break
+                        except Exception as _e2:
+                            print(f"通用 fallback 失敗: {_e2}")
+                    if not filled_email:
                         print("⚠️ 找不到 email 輸入欄,僅填密碼(可能失敗)。")
                     sb.update_text("input[type='password']", ICEHOST_PASSWORD)
                     sb.sleep(2)
-                    sb.click('button[type="submit"]')
+                    try:
+                        sb.click('button[type="submit"]')
+                    except Exception:
+                        # 可能係 input[type=submit] 或者要 Enter
+                        try:
+                            sb.click('input[type="submit"]')
+                        except Exception:
+                            sb.press_keys('input[type="password"]', '\n')
                     print("已提交登入表單,等待跳轉...")
                     sb.sleep(15)
                     sb.save_screenshot("icehost_debug_screenshot.png")
@@ -226,6 +261,16 @@ def run():
                         sb.sleep(5)
                         # 登入成功,跳過 exit,繼續往下續期
                     else:
+                        # 失敗時 dump 頁面錯誤訊息(紅字/提示),方便定位
+                        try:
+                            import re as _re3
+                            _err_block = _re3.findall(
+                                r'(?:alert|error|invalid|invalid-feedback|text-danger|danger|warning|form-text|message)[^>]*>([^<]{4,120})',
+                                src, _re3.I)
+                            print(f"登入失敗後 URL: {cur}")
+                            print(f"頁面錯誤提示: {_err_block[:10]}")
+                        except Exception as _e3:
+                            print(f"錯誤 dump 失敗: {_e3}")
                         msg = (
                             f"❌ <b>{ACCOUNT_NAME} 密碼登入失敗</b>\n\n"
                             f"已嘗試自動登入但仍在登入頁,請檢查 <code>ICEHOST_EMAIL</code>/<code>ICEHOST_PASSWORD</code> 是否正確,或登入頁有人機驗證無法通過。\n\n"
