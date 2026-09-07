@@ -176,19 +176,22 @@ def run():
             # 新增:Cookie 失效時,若已配置賬戶密碼,自動轉密碼登入
             if ICEHOST_EMAIL and ICEHOST_PASSWORD:
                 print("Cookie 失效,嘗試用賬戶密碼登入...")
-                # 關鍵修: 只刪死 session/XSRF cookie,保留 WAF/CF 放行 cookie。
-                # 全刪會觸發 WAF "IceHost - Block" 頁(Run 34152486435 實測)。
+                # 關鍵修(六輪實測): WAF 只驗 session cookie「存在」唔驗「有效」
+                # (Run 34151573065: 死 session 都照渲染表單), 一旦冇 session
+                # cookie 就 "IceHost - Block"。所以:
+                #   1. 保留 icehostpl_session(死值都係 WAF 放行牌)
+                #   2. 只刪 XSRF-TOKEN(死 token 係 "CSRF mismatch" 元兇)
+                #   3. refresh 後後端派新 session+新 XSRF, 登入 XHR 就能過 CSRF
                 try:
-                    _dead = {"icehostpl_session", "XSRF-TOKEN", "laravel_session"}
                     for c in sb.driver.get_cookies():
-                        if c.get("name") in _dead:
+                        if c.get("name") == "XSRF-TOKEN":
                             try:
                                 sb.driver.delete_cookie(c["name"])
                             except Exception:
                                 pass
-                    print("已移除死 session/XSRF cookies(保留 WAF/CF cookies)。")
+                    print("已移除 XSRF-TOKEN(保留 session cookie 作 WAF 放行牌)。")
                 except Exception as e:
-                    print(f"移除 cookies 異常: {e}")
+                    print(f"移除 XSRF cookie 異常: {e}")
                 # 用原頁 refresh 而唔係新導航: 新導航 /auth/login 會被 WAF 判做
                 # 新訪客直接 "IceHost - Block"(Run 34152836486 實測), refresh 有機會過
                 try:
