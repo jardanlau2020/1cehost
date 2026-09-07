@@ -176,16 +176,19 @@ def run():
             # 新增:Cookie 失效時,若已配置賬戶密碼,自動轉密碼登入
             if ICEHOST_EMAIL and ICEHOST_PASSWORD:
                 print("Cookie 失效,嘗試用賬戶密碼登入...")
-                # 關鍵修(Run 34151573065 實測): 死 session 的 XSRF-TOKEN cookie
-                # 會令登入 XHR 一直 "CSRF token mismatch", 必須先清空 cookies
+                # 關鍵修: 只刪死 session/XSRF cookie,保留 WAF/CF 放行 cookie。
+                # 全刪會觸發 WAF "IceHost - Block" 頁(Run 34152486435 實測)。
                 try:
-                    try:
-                        sb.delete_all_cookies()
-                    except Exception:
-                        sb.driver.delete_all_cookies()
-                    print("已清除全部 cookies(移除死 XSRF-TOKEN)。")
+                    _dead = {"icehostpl_session", "XSRF-TOKEN", "laravel_session"}
+                    for c in sb.driver.get_cookies():
+                        if c.get("name") in _dead:
+                            try:
+                                sb.driver.delete_cookie(c["name"])
+                            except Exception:
+                                pass
+                    print("已移除死 session/XSRF cookies(保留 WAF/CF cookies)。")
                 except Exception as e:
-                    print(f"清除 cookies 異常: {e}")
+                    print(f"移除 cookies 異常: {e}")
                 sb.uc_open_with_reconnect("https://dash.icehost.pl/auth/login", reconnect_time=8)
                 sb.sleep(8)
                 # 確認登入表單真係渲染咗,否則 dump 頁面狀態即失敗(唔好喺空页面盲填)
