@@ -176,34 +176,30 @@ def run():
             # 新增:Cookie 失效時,若已配置賬戶密碼,自動轉密碼登入
             if ICEHOST_EMAIL and ICEHOST_PASSWORD:
                 print("Cookie 失效,嘗試用賬戶密碼登入...")
-                # 若當前頁面已是登入頁(URL 含 login)就原地填寫,否則才導航
-                if "login" not in sb.get_current_url():
-                    sb.uc_open_with_reconnect("https://dash.icehost.pl/auth/login", reconnect_time=8)
-                    sb.sleep(5)
-                else:
-                    print("當前已在登入頁,原地填寫。")
+                # 關鍵修(Run 34151573065 實測): 死 session 的 XSRF-TOKEN cookie
+                # 會令登入 XHR 一直 "CSRF token mismatch", 必須先清空 cookies
+                try:
+                    try:
+                        sb.delete_all_cookies()
+                    except Exception:
+                        sb.driver.delete_all_cookies()
+                    print("已清除全部 cookies(移除死 XSRF-TOKEN)。")
+                except Exception as e:
+                    print(f"清除 cookies 異常: {e}")
+                sb.uc_open_with_reconnect("https://dash.icehost.pl/auth/login", reconnect_time=8)
+                sb.sleep(8)
                 try:
                     sb.uc_gui_click_captcha()
                     sb.sleep(10)
                 except Exception as e:
                     print(f"登入頁驗證盾處理異常(可忽略): {e}")
                 try:
-                    # 登入頁 DOM 轉儲:方便下次直接照實測 selector 改
-                    try:
-                        import re as _re2
-                        _form_src = sb.get_page_source()
-                        _mform = _re2.search(r'<form.*?</form>', _form_src, _re2.S | _re2.I)
-                        print("=== LOGIN FORM HTML ===")
-                        print(_mform.group(0)[:4000] if _mform else "NO FORM FOUND")
-                        print("=== END LOGIN FORM ===")
-                    except Exception as _e:
-                        print(f"form dump failed: {_e}")
+                    # 實測 DOM: email 欄 = input[name='username'](type=text), 其餘 fallback
                     email_locators = [
-                        "input[type='email']",
-                        "input[name='identification']",
-                        "input[name='email']",
+                        "input[name='username']",
                         "input[type='text']",
-                        "input[placeholder*='mail' i]",
+                        "input[name='email']",
+                        "input[type='email']",
                     ]
                     filled_email = False
                     for loc in email_locators:
