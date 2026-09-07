@@ -56,7 +56,10 @@ def send_tg_notification(message, photo_path=None):
 def run():
     if not SERVER_URL:
         print("错误: 缺少 ICEHOST_SERVER_URL 环境变量")
-        return
+        raise SystemExit(2)
+    if not ICEHOST_COOKIES:
+        print("错误: 缺少 ICEHOST_COOKIES 环境变量")
+        raise SystemExit(2)
 
     # 1. 启动 SeleniumBase 并开启 UC 免密/防检测模式与 Xvfb 虚拟桌面 (xvfb=True)
     with SB(uc=True, xvfb=True) as sb:
@@ -80,40 +83,25 @@ def run():
                         cookies_to_add = raw_data.get("cookies", [])
                     print("检测到 JSON 格式 Cookie，正在解析...")
 
-                # 尝试二：如果解析失败，说明填的是纯文本
+                # 尝试二：如果解析失败，解析 Cookie header / KEY=value 文本
                 except json.JSONDecodeError:
                     print(
                         "检测到纯文本 Cookie 格式，正在自动提取并生成标准字段..."
                     )
 
-                    # 提取真正的 Token 字符串值
-                    token_value = raw_cookies_str
-                    if "icehostpl_session=" in token_value:
-                        token_value = (
-                            token_value.split("icehostpl_session=")[1].split(
-                                ";"
-                            )[0]
-                        )
-                    elif "XSRF-TOKEN=" in token_value:
-                        token_value = token_value.split("XSRF-TOKEN=")[
-                            1
-                        ].split(";")[0]
-
-                    token_value = token_value.strip()
-
-                    # 自动为 Selenium 生成两个核心的 Cookie 字典
+                    # 支持 `name=value; name2=value2`，避免把 XSRF 值误当 session
+                    pairs = {}
+                    for part in raw_cookies_str.split(";"):
+                        if "=" in part:
+                            name, value = part.strip().split("=", 1)
+                            pairs[name.strip()] = value.strip()
                     cookies_to_add = [
-                        {
-                            "name": "icehostpl_session",
-                            "value": token_value,
-                            "domain": "dash.icehost.pl",
-                        },
-                        {
-                            "name": "XSRF-TOKEN",
-                            "value": token_value,
-                            "domain": "dash.icehost.pl",
-                        },
+                        {"name": name, "value": pairs[name], "domain": "dash.icehost.pl"}
+                        for name in ("icehostpl_session", "XSRF-TOKEN")
+                        if pairs.get(name)
                     ]
+                    if not cookies_to_add:
+                        raise ValueError("纯文本 Cookie 中未找到 icehostpl_session/XSRF-TOKEN")
 
                 # 统一执行转换与注入
                 for c in cookies_to_add:
@@ -183,8 +171,9 @@ def run():
             )
             print("❌ Cookie 已失效,已發 TG 通知要求更換。")
             send_tg_notification(msg, "icehost_debug_screenshot.png")
-            return
-        print("✅ Cookie 有效,登入狀態正常。")
+            # Cookie 失效係真正失敗，回傳非零，避免 Matrix workflow 假綠燈
+            raise SystemExit(2)
+        print("✅ Cookie 有效,登入狀態正常。" )
 
         # 5. 判定波兰语与英语红框限制
         page_source = sb.get_page_source()
@@ -307,6 +296,7 @@ def run():
             )
             print(f"未在页面中找到可用的续期按钮: {e}")
             send_tg_notification(error_msg, "icehost_debug_screenshot.png")
+            raise SystemExit(1)
 
 
 if __name__ == "__main__":
