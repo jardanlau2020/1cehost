@@ -2,6 +2,10 @@ name: IceHost Renew
 
 on:
   workflow_dispatch:
+    inputs:
+      reason:
+        description: 僅供手動觸發(留空即可)
+        required: false
   schedule:
     # 每 5 小時跑一次(免費機每 6 小時到期,留 1 小時緩衝)
     # UTC 時間,對應北京時間 +8
