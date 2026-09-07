@@ -12,30 +12,67 @@ on:
     - cron: '0 */5 * * *'
 
 jobs:
-  remind:
-    name: IceHost 續期提醒
+  renew:
+    name: IceHost ${{ matrix.account }}
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        account: ["01", "02"]
 
     steps:
-      - name: 🔔 發送 Telegram 續期提醒
+      - uses: actions/checkout@v6
+
+      - name: ⚙ 設置 Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: 🛠️ 安裝依賴
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb x11-utils xdotool scrot fonts-noto-cjk
+          pip install seleniumbase requests
+          seleniumbase install chromedriver
+
+      - name: 📍 確認出口 IP
+        continue-on-error: true
+        run: |
+          echo "Runner 出口 IP: $(curl -s --max-time 15 https://api.ipify.org || echo n/a)"
+          curl -s --max-time 15 https://ipinfo.io/json || true
+
+      - name: ⚙ 设置代理 (sing-box, 可选)
+        continue-on-error: true
         env:
+          NODE_LINK: ${{ secrets.NODE_LINK }}
+        run: |
+          bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
+
+      - name: 🔄 執行 IceHost 自動續期(Cookie 優先,Cookie 失效自動轉密碼登入)
+        env:
+          ICEHOST_ACCOUNT_NAME: ${{ matrix.account == '01' && 'IceHost 01' || 'IceHost 02' }}
+          ICEHOST_SERVER_URL: ${{ matrix.account == '01' && secrets.ICEHOST_SERVER_URL || secrets.ICEHOST_SERVER_URL_02 }}
+          ICEHOST_COOKIES: ${{ matrix.account == '01' && secrets.ICEHOST_COOKIES || secrets.ICEHOST_COOKIES_02 }}
+          ICEHOST_EMAIL: ${{ matrix.account == '01' && secrets.ICEHOST_EMAIL || secrets.ICEHOST_EMAIL_02 }}
+          ICEHOST_PASSWORD: ${{ matrix.account == '01' && secrets.ICEHOST_PASSWORD || secrets.ICEHOST_PASSWORD_02 }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          SERVER_URL_01: ${{ secrets.ICEHOST_SERVER_URL || 'https://dash.icehost.pl/server/7dae0ce5' }}
-          SERVER_URL_02: ${{ secrets.ICEHOST_SERVER_URL_02 || 'https://dash.icehost.pl/server/e659dad6' }}
         run: |
-          TEXT=$(printf '%s\n' \
-            '🔔 IceHost 續期提醒(人手操作)' \
-            '' \
-            '自動續期因平台登入限制已停用,請你登入 https://dash.icehost.pl 後:' \
-            '' \
-            "1. 開 01: ${SERVER_URL_01}" \
-            "2. 開 02: ${SERVER_URL_02}" \
-            '3. 兩邊各自撳「ADD 6 HOURS VALIDITY」' \
-            '4. 確認 EXPIRATION DATE 有推遲 6 小時' \
-            '' \
-            '⚠️ 超過 72 小時未續期,伺服器連檔一齊刪。')
-          curl -sS -X POST "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
-            -d "chat_id=${TG_CHAT_ID}" \
-            --data-urlencode "text=${TEXT}"
+          if pgrep -f sing-box >/dev/null 2>&1; then
+            export PROXY_SERVER="socks5://127.0.0.1:1080"
+            echo "using proxy: socks5://127.0.0.1:1080"
+          else
+            export PROXY_SERVER=""
+            echo "no proxy, direct mode"
+          fi
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 icehost_run.py
+
+      - name: 📸 上傳截圖
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: icehost-direct-renew-${{ matrix.account }}
+          path: icehost_debug_screenshot.png
+          if-no-files-found: ignore
+          retention-days: 3
