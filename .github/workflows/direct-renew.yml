@@ -1,4 +1,4 @@
-name: IceHost Renew
+name: Auto Renew
 
 on:
   workflow_dispatch:
@@ -18,7 +18,7 @@ on:
 
 jobs:
   renew:
-    name: IceHost ${{ matrix.account }}
+    name: Renew ${{ matrix.account }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -54,9 +54,9 @@ jobs:
         run: |
           bash <(wget -qO- https://main.ssss.nyc.mn/setup_proxy.sh)
 
-      - name: 🔄 執行 IceHost 自動續期(Cookie 優先,Cookie 失效自動轉密碼登入)
+      - name: 🔄 執行自動續期(Cookie 優先,Cookie 失效自動轉密碼登入)
         env:
-          ICEHOST_ACCOUNT_NAME: ${{ matrix.account == '01' && 'IceHost 01' || 'IceHost 02' }}
+          ICEHOST_ACCOUNT_NAME: ${{ matrix.account }}
           ICEHOST_SERVER_URL: ${{ matrix.account == '01' && secrets.ICEHOST_SERVER_URL || secrets.ICEHOST_SERVER_URL_02 }}
           ICEHOST_COOKIES: ${{ matrix.account == '01' && secrets.ICEHOST_COOKIES || secrets.ICEHOST_COOKIES_02 }}
           ICEHOST_EMAIL: ${{ matrix.account == '01' && secrets.ICEHOST_EMAIL || secrets.ICEHOST_EMAIL_02 }}
@@ -71,13 +71,13 @@ jobs:
             export PROXY_SERVER=""
             echo "no proxy, direct mode"
           fi
-          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 icehost_run.py
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 main.py
 
       - name: 📸 上傳截圖
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: icehost-direct-renew-${{ matrix.account }}
-          path: icehost_debug_screenshot.png
+          name: direct-renew-${{ matrix.account }}
+          path: run_screenshot.png
           if-no-files-found: ignore
           retention-days: 3

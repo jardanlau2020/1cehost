@@ -6,7 +6,7 @@ import urllib.request
 
 BASE = os.getenv("ICEHOST_API_BASE", "https://dash.icehost.pl")
 TOKEN = os.getenv("ICEHOST_API_TOKEN", "")
-ACCOUNT = os.getenv("ICEHOST_ACCOUNT_NAME", "IceHost")
+ACCOUNT = os.getenv("ICEHOST_ACCOUNT_NAME", "")
 
 
 def get(path):
@@ -15,7 +15,7 @@ def get(path):
         headers={
             "Authorization": "Bearer " + TOKEN,
             "Accept": "application/json",
-            "User-Agent": "icehost-renew-api-probe/1.0",
+            "User-Agent": "api-probe/1.0",
         },
     )
     try:

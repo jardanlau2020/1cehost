@@ -1,4 +1,4 @@
-name: IceHost-Warp-Probe
+name: Warp-Probe
 
 on:
   workflow_dispatch:
@@ -76,7 +76,7 @@ EOF
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: icehost-warp-probe
+          name: warp-probe-artifact
           path: probe_*.png
           if-no-files-found: ignore
           retention-days: 3

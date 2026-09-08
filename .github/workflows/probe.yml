@@ -1,4 +1,4 @@
-name: IceHost Probe (WAF/CF 探路，零憑據)
+name: Probe (WAF/CF 探路，零憑據)
 
 on:
   workflow_dispatch:
@@ -89,7 +89,7 @@ EOF
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: icehost-probe-screenshots
+          name: probe-screenshots
           path: probe_*.png
           if-no-files-found: ignore
           retention-days: 3

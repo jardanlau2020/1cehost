@@ -10,7 +10,7 @@ SERVER_URL = os.getenv("ICEHOST_SERVER_URL")
 ICEHOST_COOKIES = os.getenv("ICEHOST_COOKIES")
 ICEHOST_EMAIL = os.getenv("ICEHOST_EMAIL", "")
 ICEHOST_PASSWORD = os.getenv("ICEHOST_PASSWORD", "")
-ACCOUNT_NAME = os.getenv("ICEHOST_ACCOUNT_NAME", "IceHost")
+ACCOUNT_NAME = os.getenv("ICEHOST_ACCOUNT_NAME", "")
 PROXY_SERVER = os.getenv("PROXY_SERVER", "")
 
 
@@ -41,7 +41,7 @@ def send_tg_notification(message, photo_path=None):
             url = f"https://api.telegram.org/bot{token}/sendPhoto"
             with open(photo_path, "rb") as f:
                 files = {"photo": f}
-                data = {"chat_id": chat_id, "caption": "📸 IceHost 实时画面"}
+                data = {"chat_id": chat_id, "caption": "📸 实时画面"}
                 requests.post(url, data=data, files=files, timeout=20)
             print("TG 截图发送成功。")
         except Exception as e:
@@ -72,7 +72,7 @@ def run():
         print(f"使用代理: {PROXY_SERVER}")
         proxy_arg = PROXY_SERVER
     with SB(uc=True, xvfb=True, proxy=proxy_arg) as sb:
-        print(f"正在访问 IceHost 面板: {SERVER_URL}")
+        print(f"正在访问面板: {SERVER_URL}")
         sb.uc_open_with_reconnect(SERVER_URL, reconnect_time=8)
         sb.sleep(5)
 
@@ -145,7 +145,7 @@ def run():
                 raise SystemExit(2)
 
         # 3. 核心过盾：自动寻找并执行系统级物理点击过 Cloudflare Turnstile 验证盾
-        sb.save_screenshot("icehost_debug_screenshot.png")
+        sb.save_screenshot("run_screenshot.png")
         try:
             print(
                 "正在检测并调用系统级 PyAutoGUI 驱动，物理点击 Cloudflare"
@@ -154,7 +154,7 @@ def run():
             # 在虚拟桌面上定位验证框并模拟发送系统硬件级点击事件
             sb.uc_gui_click_captcha()
             sb.sleep(10)  # 给予 10 秒跳转缓冲
-            sb.save_screenshot("icehost_debug_screenshot.png")
+            sb.save_screenshot("run_screenshot.png")
         except Exception as e:
             print(f"验证盾已被跳过或点击执行完毕: {e}")
 
@@ -178,7 +178,7 @@ def run():
                 print("Cookie 失效,嘗試用賬戶密碼登入...")
                 # 關鍵修(六輪實測): WAF 只驗 session cookie「存在」唔驗「有效」
                 # (Run 34151573065: 死 session 都照渲染表單), 一旦冇 session
-                # cookie 就 "IceHost - Block"。所以:
+                # cookie 就 "WAF - Block"。所以:
                 #   1. 保留 icehostpl_session(死值都係 WAF 放行牌)
                 #   2. 只刪 XSRF-TOKEN(死 token 係 "CSRF mismatch" 元兇)
                 #   3. refresh 後後端派新 session+新 XSRF, 登入 XHR 就能過 CSRF
@@ -193,7 +193,7 @@ def run():
                 except Exception as e:
                     print(f"移除 XSRF cookie 異常: {e}")
                 # 用原頁 refresh 而唔係新導航: 新導航 /auth/login 會被 WAF 判做
-                # 新訪客直接 "IceHost - Block"(Run 34152836486 實測), refresh 有機會過
+                # 新訪客直接 "WAF - Block"(Run 34152836486 實測), refresh 有機會過
                 try:
                     sb.refresh()
                     sb.sleep(10)
@@ -215,14 +215,14 @@ def run():
                     print("=== PAGE SOURCE DUMP ===")
                     print(_src[:2500])
                     print("=== END PAGE SOURCE ===")
-                    sb.save_screenshot("icehost_debug_screenshot.png")
+                    sb.save_screenshot("run_screenshot.png")
                     send_tg_notification(
                         f"❌ <b>{ACCOUNT_NAME} 登入頁異常</b>\n\n"
                         "清除 cookie 後重新載入登入頁,但表單冇渲染出嚟"
                         "(可能係 Cloudflare 盾/頁面結構變動)。請睇截圖。\n\n"
                         f"🔗 URL: {_url[:100]}\n"
                         f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}",
-                        "icehost_debug_screenshot.png")
+                        "run_screenshot.png")
                     raise SystemExit(3)
                 try:
                     sb.uc_gui_click_captcha()
@@ -277,7 +277,7 @@ def run():
                             sb.press_keys('input[type="password"]', '\n')
                     print("已提交登入表單,等待跳轉...")
                     sb.sleep(15)
-                    sb.save_screenshot("icehost_debug_screenshot.png")
+                    sb.save_screenshot("run_screenshot.png")
 
                     # 登入後再次判定是否仍停留在登入頁
                     cur = sb.get_current_url()
@@ -310,7 +310,7 @@ def run():
                             f"🔗 當前 URL: {cur[:80]}"
                         )
                         print("密碼登入失敗,已發 TG 通知。")
-                        send_tg_notification(msg, "icehost_debug_screenshot.png")
+                        send_tg_notification(msg, "run_screenshot.png")
                         raise SystemExit(3)
                 except SystemExit:
                     raise
@@ -329,7 +329,7 @@ def run():
                     f"🔗 當前 URL: {current_url[:80]}"
                 )
                 print("❌ Cookie 已失效,已發 TG 通知要求更換。")
-                send_tg_notification(msg, "icehost_debug_screenshot.png")
+                send_tg_notification(msg, "run_screenshot.png")
                 # Cookie 失效係真正失敗,回傳非零,避免 Matrix workflow 假綠燈
                 raise SystemExit(2)
         print("✅ Cookie 有效,登入狀態正常。" )
@@ -372,7 +372,7 @@ def run():
 
             # ⚡ 点击后，在不刷新页面的前提下，先等待 5 秒让可能弹出的红框提示充分渲染
             sb.sleep(5)
-            sb.save_screenshot("icehost_debug_screenshot.png")
+            sb.save_screenshot("run_screenshot.png")
 
             # 立即读取当前最真实的页面源码（此时若有报错红条，必定还挂在屏幕上）
             current_source = sb.get_page_source()
@@ -389,7 +389,7 @@ def run():
             print("点击后未检测到报错红条，正在刷新页面确认续期结果...")
             sb.refresh()
             sb.sleep(5)
-            sb.save_screenshot("icehost_debug_screenshot.png")
+            sb.save_screenshot("run_screenshot.png")
 
             updated_source = sb.get_page_source()
             is_now_limited = any(kw in updated_source for kw in keywords)
@@ -419,7 +419,7 @@ def run():
                     f"⏰ 執行時間: {time.strftime('%Y-%m-%d %H:%M:%S')}"
                 )
                 print(msg)
-                send_tg_notification(msg, "icehost_debug_screenshot.png")
+                send_tg_notification(msg, "run_screenshot.png")
             elif is_now_limited:
                 print(
                     "刷新后检测到限制提示：说明未到可续期时间。本次未完成续期。"
@@ -432,7 +432,7 @@ def run():
                     f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}"
                 )
                 print(msg)
-                send_tg_notification(msg, "icehost_debug_screenshot.png")
+                send_tg_notification(msg, "run_screenshot.png")
             else:
                 msg = (
                     f"ℹ️ <b>{ACCOUNT_NAME} 續期指令已發送</b>\n\n"
@@ -442,7 +442,7 @@ def run():
                     f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}"
                 )
                 print(msg)
-                send_tg_notification(msg, "icehost_debug_screenshot.png")
+                send_tg_notification(msg, "run_screenshot.png")
 
         except Exception as e:
             error_msg = (
@@ -454,7 +454,7 @@ def run():
                 f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}"
             )
             print(f"未在页面中找到可用的续期按钮: {e}")
-            send_tg_notification(error_msg, "icehost_debug_screenshot.png")
+            send_tg_notification(error_msg, "run_screenshot.png")
             raise SystemExit(1)
 
 

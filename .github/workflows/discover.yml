@@ -1,4 +1,4 @@
-name: IceHost Discover Server URL
+name: Discover Server URL
 
 on:
   workflow_dispatch:
@@ -37,7 +37,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: icehost-discover
+          name: discover-artifact
           path: discover_screenshot.png
           if-no-files-found: ignore
           retention-days: 3

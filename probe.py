@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-IceHost WAF / CF 盾探路腳本 —— 零憑據。
+WAF / CF 盾探路腳本 —— 零憑據。
 目的：確認 GitHub Actions 出口 IP 直連 dash.icehost.pl 到底係
   (a) WAF 國別/IP 封鎖（Connection Blocked）
   (b) CF Turnstile 挑戰（可用 uc_gui_click_captcha 過）
