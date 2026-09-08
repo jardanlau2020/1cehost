@@ -399,18 +399,27 @@ def run():
             _new_exp = _m1.group(2) if _m1 else None
             print(f"续期后 EXPIRATION DATE: {_new_exp}")
 
-            def _parse_ts(s):
-                try:
-                    return int(_re.sub(r'[^0-9]', '', s))
-                except Exception:
+            from datetime import datetime as _dt
+            def _parse_exp(s):
+                if not s:
                     return None
+                s = s.replace('T', ' ')
+                for _fmt in ('%Y-%m-%d %H:%M', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
+                    try:
+                        return _dt.strptime(s, _fmt)
+                    except Exception:
+                        continue
+                return None
 
             _confirmed = False
             if _old_exp and _new_exp:
-                _d = _parse_ts(_new_exp) - _parse_ts(_old_exp)
-                # 差约 5~7 小时 = 成功（正常加6小时）；允许 5~9 小时容差
-                if _d is not None and 5000 <= _d <= 60000:
-                    _confirmed = True
+                _ot = _parse_exp(_old_exp)
+                _nt = _parse_exp(_new_exp)
+                if _ot and _nt:
+                    _d = (_nt - _ot).total_seconds()
+                    # 正常 +6 小时；允许 5~9 小时容差(18000~32400 秒)
+                    if 18000 <= _d <= 32400:
+                        _confirmed = True
 
             if _confirmed:
                 msg = (
