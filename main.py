@@ -454,6 +454,31 @@ def run():
                 send_tg_notification(msg, "run_screenshot.png")
 
         except Exception as e:
+            print(f"未在页面中找到可用的续期按钮: {e}")
+            # [DIAG] 搵唔到掣唔好淨係報錯——dump 全現場俾 log 分析
+            try:
+                _diag_url = sb.get_current_url()
+                print(f"[DIAG] 當前 URL: {_diag_url}")
+                # 列出頁面所有按鈕/鏈結文字,搵下掣去咗邊
+                _btns = sb.find_elements("button, a.btn, input[type=submit], a[href*='renew'], a[href*='extend']")
+                print(f"[DIAG] 頁面共 {len(_btns)} 個按鈕/鏈結候選:")
+                for _b in _btns[:40]:
+                    try:
+                        _txt = (_b.text or _b.get_attribute("value") or "").strip().replace("\n", " ")[:60]
+                        _tag = _b.tag_name
+                        _href = _b.get_attribute("href") or ""
+                        print(f"[DIAG]   <{_tag}> '{_txt}' href={_href[:80]}")
+                    except Exception:
+                        pass
+                # dump 頁面可見文字摘要(去標籤後前 1200 字),睇下過期版頁面係乜樣
+                import re as _rd
+                _vis = _rd.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', sb.get_page_source(), flags=_rd.S | _rd.I)
+                _vis = _rd.sub(r'<[^>]+>', ' ', _vis)
+                _vis = _rd.sub(r'\s+', ' ', _vis)
+                print(f"[DIAG] 頁面可見文字(前1200字): {_vis[:1200]}")
+            except Exception as _de:
+                print(f"[DIAG] dump 失敗: {_de}")
+            sb.save_screenshot("run_screenshot.png")
             error_msg = (
                 f"❌ <b>{ACCOUNT_NAME} 續期異常!</b>\n\n"
                 f"搵唔到續期掣(ADD 6 HOURS VALIDITY),可能原因:\n"
@@ -462,7 +487,6 @@ def run():
                 f"• 掣文字有變\n\n"
                 f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}"
             )
-            print(f"未在页面中找到可用的续期按钮: {e}")
             send_tg_notification(error_msg, "run_screenshot.png")
             raise SystemExit(1)
 
