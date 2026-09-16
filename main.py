@@ -476,6 +476,27 @@ def run():
                 _vis = _rd.sub(r'<[^>]+>', ' ', _vis)
                 _vis = _rd.sub(r'\s+', ' ', _vis)
                 print(f"[DIAG] 頁面可見文字(前1200字): {_vis[:1200]}")
+                # [DIAG2] suspended 頁偵測: 全量 <a href>(di scan 漏普通 link)+ banner 區 HTML
+                try:
+                    _links = sb.find_elements("a[href]")
+                    print(f"[DIAG2] 全頁 <a href> 共 {len(_links)}:")
+                    for _a in _links[:60]:
+                        try:
+                            _t2 = (_a.text or "").strip().replace("\n", " ")[:60]
+                            _h2 = _a.get_attribute("href") or ""
+                            if _t2 or any(k in _h2 for k in ("renew", "extend", "pay", "opla", "przed", "suspend", "react", "servers")):
+                                print(f"[DIAG2]   <a> '{_t2}' href={_h2[:100]}")
+                        except Exception:
+                            pass
+                    _src_raw = sb.get_page_source()
+                    _mi = _src_raw.find("Suspended")
+                    if _mi >= 0:
+                        _seg = _src_raw[max(0, _mi - 600):_mi + 900]
+                        print(f"[DIAG2] Suspended 區域 HTML:\n{_seg}")
+                    else:
+                        print("[DIAG2] 頁面無 'Suspended' 字眼")
+                except Exception as _de2:
+                    print(f"[DIAG2] dump 失敗: {_de2}")
             except Exception as _de:
                 print(f"[DIAG] dump 失敗: {_de}")
             sb.save_screenshot("run_screenshot.png")
