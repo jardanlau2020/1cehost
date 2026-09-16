@@ -500,14 +500,24 @@ def run():
             except Exception as _de:
                 print(f"[DIAG] dump 失敗: {_de}")
             sb.save_screenshot("run_screenshot.png")
-            error_msg = (
-                f"❌ <b>{ACCOUNT_NAME} 續期異常!</b>\n\n"
-                f"搵唔到續期掣(ADD 6 HOURS VALIDITY),可能原因:\n"
-                f"• 網頁載入失敗或被 WAF 擋\n"
-                f"• 未到可續期窗口(掣被隱藏)\n"
-                f"• 掣文字有變\n\n"
-                f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
+            _issusp = "Suspended" in sb.get_page_source()
+            if _issusp:
+                error_msg = (
+                    f"🔴 <b>{ACCOUNT_NAME} 已被 IceHost 停權(Suspended)!</b>\n\n"
+                    f"伺服器已過期被官方停權, 續期掣已從頁面消失,\n"
+                    f"要人手入 panel 解封/等寬限期內恢復, 見截圖。\n"
+                    f"(陣容: 72h 寬限期後刪機, 唔好拖)\n\n"
+                    f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+            else:
+                error_msg = (
+                    f"❌ <b>{ACCOUNT_NAME} 續期異常!</b>\n\n"
+                    f"搵唔到續期掣(ADD 6 HOURS VALIDITY),可能原因:\n"
+                    f"• 網頁載入失敗或被 WAF 擋\n"
+                    f"• 未到可續期窗口(掣被隱藏)\n"
+                    f"• 掣文字有變\n\n"
+                    f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
             send_tg_notification(error_msg, "run_screenshot.png")
             raise SystemExit(1)
 
