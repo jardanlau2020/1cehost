@@ -40,20 +40,20 @@ jobs:
           tar xzf wp.tar.gz
           ls -la wireproxy >/dev/null 2>&1 || ls -la
           cat > /tmp/wp.conf <<EOF
-[Interface]
-PrivateKey = $PRIV
-Address = 172.16.0.2/32, fd01:5ca1:ab1e:823e:e094::8888/128
-DNS = 1.1.1.1
+          [Interface]
+          PrivateKey = $PRIV
+          Address = 172.16.0.2/32, fd01:5ca1:ab1e:823e:e094::8888/128
+          DNS = 1.1.1.1
 
-[Socks5]
-BindAddress = 127.0.0.1:10808
+          [Socks5]
+          BindAddress = 127.0.0.1:10808
 
-[Peer]
-PublicKey = $PEER
-Endpoint = $ENDP
-PersistentKeepalive = 25
-AllowedIPs = 0.0.0.0/0, ::/0
-EOF
+          [Peer]
+          PublicKey = $PEER
+          Endpoint = $ENDP
+          PersistentKeepalive = 25
+          AllowedIPs = 0.0.0.0/0, ::/0
+          EOF
           nohup /tmp/wireproxy -c /tmp/wp.conf > /tmp/wireproxy.log 2>&1 &
           sleep 4
           cat /tmp/wireproxy.log || true
