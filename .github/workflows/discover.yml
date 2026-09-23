@@ -35,7 +35,7 @@ jobs:
 
       - name: 📸 上傳截圖
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: discover-artifact
           path: discover_screenshot.png
