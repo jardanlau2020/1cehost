@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 import urllib.parse
 import requests
@@ -12,6 +13,40 @@ ICEHOST_EMAIL = os.getenv("ICEHOST_EMAIL", "")
 ICEHOST_PASSWORD = os.getenv("ICEHOST_PASSWORD", "")
 ACCOUNT_NAME = os.getenv("ICEHOST_ACCOUNT_NAME", "")
 PROXY_SERVER = os.getenv("PROXY_SERVER", "")
+
+SERVICE_NAME = "1cehost"
+
+
+def now_local():
+    """UTC+8 當地時間 MM-DD HH:MM（runner 係 UTC）"""
+    return time.strftime("%m-%d %H:%M", time.gmtime(time.time() + 8 * 3600))
+
+
+def fmt_exp(value):
+    """到期時間 'YYYY-MM-DD HH:MM' → 'MM-DD HH:MM'（讀唔到就回 '讀唔到'）"""
+    if not value:
+        return "讀唔到"
+    text = str(value)
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})", text)
+    if m:
+        return f"{m.group(2)}-{m.group(3)} {m.group(4)}:{m.group(5)}"
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})", text)
+    if m:
+        return f"{m.group(2)}-{m.group(3)}"
+    return text[:16]
+
+
+def build_notice(account, status, detail=None, warn=False, ok=0, skip=0, bad=0):
+    """瘦身通知：表頭一行（時間＋統計）＋每項一行；失敗／需人手先加 ⚠️ 一行"""
+    lines = [
+        f"🎮 {SERVICE_NAME} 續期 ｜ {now_local()} ｜ ✅ {ok} ｜ ⏭️ {skip} ｜ ❌ {bad}",
+        " · ".join(
+            part for part in (f"▪️ {account or '默認帳號'}", status, detail) if part
+        ),
+    ]
+    if warn:
+        lines.append("⚠️ 睇 workflow log 排查")
+    return "\n".join(lines)
 
 
 def send_tg_notification(message, photo_path=None):
@@ -217,11 +252,10 @@ def run():
                     print("=== END PAGE SOURCE ===")
                     sb.save_screenshot("run_screenshot.png")
                     send_tg_notification(
-                        f"❌ <b>{ACCOUNT_NAME} 登入頁異常</b>\n\n"
-                        "清除 cookie 後重新載入登入頁,但表單冇渲染出嚟"
-                        "(可能係 Cloudflare 盾/頁面結構變動)。請睇截圖。\n\n"
-                        f"🔗 URL: {_url[:100]}\n"
-                        f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}",
+                        build_notice(
+                            ACCOUNT_NAME,
+                            "❌ 登入頁異常:表單冇渲染（CF 盾／頁面結構變動）",
+                            warn=True, bad=1),
                         "run_screenshot.png")
                     raise SystemExit(3)
                 try:
@@ -303,12 +337,10 @@ def run():
                             print(f"頁面錯誤提示: {_err_block[:10]}")
                         except Exception as _e3:
                             print(f"錯誤 dump 失敗: {_e3}")
-                        msg = (
-                            f"❌ <b>{ACCOUNT_NAME} 密碼登入失敗</b>\n\n"
-                            f"已嘗試自動登入但仍在登入頁,請檢查 <code>ICEHOST_EMAIL</code>/<code>ICEHOST_PASSWORD</code> 是否正確,或登入頁有人機驗證無法通過。\n\n"
-                            f"⏰ 偵測時間: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                            f"🔗 當前 URL: {cur[:80]}"
-                        )
+                        msg = build_notice(
+                            ACCOUNT_NAME,
+                            "❌ 密碼登入後仍在登入頁,查 EMAIL/PASSWORD 或人機驗證",
+                            warn=True, bad=1)
                         print("密碼登入失敗,已發 TG 通知。")
                         send_tg_notification(msg, "run_screenshot.png")
                         raise SystemExit(3)
@@ -318,16 +350,10 @@ def run():
                     print(f"密碼登入過程異常: {e}")
                     raise SystemExit(3)
             else:
-                msg = (
-                    f"🔁 <b>{ACCOUNT_NAME} Cookie 已失效,需要更換!</b>\n\n"
-                    "自動續期已停止,因為 <code>icehostpl_session</code> 過期或被後台踢出。\n\n"
-                    "<b>請照做:</b>\n"
-                    "1. 用瀏覽器登入 dash.icehost.pl\n"
-                    "2. F12 → Application → Cookies → 複製 <code>icehostpl_session</code> 全值\n"
-                    "3. 貼返俾助手更新 <code>ICEHOST_COOKIES</code>\n\n"
-                    f"⏰ 偵測時間: {time.strftime('%Y-%m-%d %H:%M:%S')}\n"
-                    f"🔗 當前 URL: {current_url[:80]}"
-                )
+                msg = build_notice(
+                    ACCOUNT_NAME,
+                    "❌ Cookie 失效需人手換:F12 抄 icehostpl_session 更新 ICEHOST_COOKIES",
+                    warn=True, bad=1)
                 print("❌ Cookie 已失效,已發 TG 通知要求更換。")
                 send_tg_notification(msg, "run_screenshot.png")
                 # Cookie 失效係真正失敗,回傳非零,避免 Matrix workflow 假綠燈
@@ -422,11 +448,11 @@ def run():
                         _confirmed = True
 
             if _confirmed:
-                msg = (
-                    f"⚡ <b>{ACCOUNT_NAME} 續期成功!</b>\n\n"
-                    f"到期時間: {_old_exp} → <b>{_new_exp}</b>(+6 小時)\n"
-                    f"⏰ 執行時間: {time.strftime('%Y-%m-%d %H:%M:%S')}"
-                )
+                msg = build_notice(
+                    ACCOUNT_NAME,
+                    f"✅ 已續期 → {fmt_exp(_new_exp)}",
+                    f"前 {fmt_exp(_old_exp)}",
+                    ok=1)
                 print(msg)
                 send_tg_notification(msg, "run_screenshot.png")
             elif is_now_limited:
@@ -434,22 +460,19 @@ def run():
                     "刷新后检测到限制提示：说明未到可续期时间。本次未完成续期。"
                 )
             elif _old_exp and _new_exp and _old_exp == _new_exp:
-                msg = (
-                    f"⚠️ <b>{ACCOUNT_NAME} 續期未生效</b>\n\n"
-                    f"已撳過續期掣,但到期時間冇變({_new_exp})。\n"
-                    f"可能未到可續期窗口,或後端拒絕。請睇截圖。\n"
-                    f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}"
-                )
+                msg = build_notice(
+                    ACCOUNT_NAME,
+                    "⏭️ 未可續（到期時間冇變）",
+                    f"到期 {fmt_exp(_new_exp)}",
+                    warn=True, skip=1)
                 print(msg)
                 send_tg_notification(msg, "run_screenshot.png")
             else:
-                msg = (
-                    f"ℹ️ <b>{ACCOUNT_NAME} 續期指令已發送</b>\n\n"
-                    f"續期前: {_old_exp or '讀唔到'}\n"
-                    f"續期後: {_new_exp or '讀唔到'}\n"
-                    f"未能完成時間對比,請睇截圖確認。\n"
-                    f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}"
-                )
+                msg = build_notice(
+                    ACCOUNT_NAME,
+                    "⏭️ 未可續（未能確認結果）",
+                    f"{fmt_exp(_old_exp)} → {fmt_exp(_new_exp)}",
+                    warn=True, skip=1)
                 print(msg)
                 send_tg_notification(msg, "run_screenshot.png")
 
@@ -502,22 +525,16 @@ def run():
             sb.save_screenshot("run_screenshot.png")
             _issusp = "Suspended" in sb.get_page_source()
             if _issusp:
-                error_msg = (
-                    f"🔴 <b>{ACCOUNT_NAME} 已被 IceHost 停權(Suspended)!</b>\n\n"
-                    f"伺服器已過期被官方停權, 續期掣已從頁面消失,\n"
-                    f"要人手入 panel 解封/等寬限期內恢復, 見截圖。\n"
-                    f"(陣容: 72h 寬限期後刪機, 唔好拖)\n\n"
-                    f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}"
-                )
+                error_msg = build_notice(
+                    ACCOUNT_NAME,
+                    "❌ 已被停權（Suspended）,續期掣消失,需人手入 panel 解封",
+                    "72h 寬限期後刪機",
+                    warn=True, bad=1)
             else:
-                error_msg = (
-                    f"❌ <b>{ACCOUNT_NAME} 續期異常!</b>\n\n"
-                    f"搵唔到續期掣(ADD 6 HOURS VALIDITY),可能原因:\n"
-                    f"• 網頁載入失敗或被 WAF 擋\n"
-                    f"• 未到可續期窗口(掣被隱藏)\n"
-                    f"• 掣文字有變\n\n"
-                    f"⏰ {time.strftime('%Y-%m-%d %H:%M:%S')}"
-                )
+                error_msg = build_notice(
+                    ACCOUNT_NAME,
+                    "❌ 搵唔到續期掣（ADD 6 HOURS）,可能 WAF 擋／未到窗口",
+                    warn=True, bad=1)
             send_tg_notification(error_msg, "run_screenshot.png")
             raise SystemExit(1)
 
