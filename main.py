@@ -37,16 +37,32 @@ def fmt_exp(value):
 
 
 def build_notice(account, status, detail=None, warn=False, ok=0, skip=0, bad=0):
-    """瘦身通知：表頭一行（時間＋統計）＋每項一行；失敗／需人手先加 ⚠️ 一行"""
-    lines = [
-        f"🎮 {SERVICE_NAME} 續期 ｜ {now_local()} ｜ ✅ {ok} ｜ ⏭️ {skip} ｜ ❌ {bad}",
-        " · ".join(
-            part for part in (f"▪️ {account or '默認帳號'}", status, detail) if part
-        ),
-    ]
-    if warn:
-        lines.append("⚠️ 睇 workflow log 排查")
-    return "\n".join(lines)
+    """方案 B (極致精簡人話版): 每台精準兩行，徹底消滅頂部計數器"""
+    name = f"{SERVICE_NAME}（{account}）" if account and account != "默認帳號" else SERVICE_NAME
+    s = (status or "").strip()
+    
+    if ok or s.startswith("✅"):
+        exp_str = f"至 {detail}" if detail and "前" not in detail else ""
+        if not exp_str and "→" in s:
+            exp_str = "至 " + s.split("→")[-1].strip()
+        l1 = f"✅ {name} · 成功續期" + (f" {exp_str}" if exp_str else "")
+        l2 = "ℹ️ 服務已自動展期"
+        return f"{l1}\n{l2}"
+    elif bad or s.startswith("❌"):
+        l1 = f"🚨 {name} · 續期未完成"
+        err = s.lstrip("❌").strip()
+        if detail:
+            err = f"{err}（{detail}）"
+        l2 = f"⚠️ {err} · 請登入面板手動處理"
+        return f"{l1}\n{l2}"
+    else: # skip / 狀態良好
+        l1 = f"🟢 {name} · 狀態良好"
+        info_parts = []
+        if detail:
+            info_parts.append(detail if "到期" in detail else f"{detail} 到期")
+        info_parts.append("未到續期窗口")
+        l2 = "ℹ️ " + " · ".join(info_parts)
+        return f"{l1}\n{l2}"
 
 
 def send_tg_notification(message, photo_path=None):
