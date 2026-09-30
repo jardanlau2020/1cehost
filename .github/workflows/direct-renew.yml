@@ -66,13 +66,30 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
+          # [採自上游 nelgevbe/Icehost-Renew renew.yml 2026-08-24 版]
+          # 上游原則:「進程存在」唔等於「代理通」——真連一次 ipify 先算數。
+          # 本仓之前只 pgrep sing-box 就當通,一旦 setup_proxy.sh 半途失敗
+          # (該步 continue-on-error),成個續期會行喺死代理上面。
+          # 呢度只做「驗證 + 回退直連」,唔會因為代理唔通而中斷續期。
+          PROXY_SERVER=""
           if pgrep -f sing-box >/dev/null 2>&1; then
-            export PROXY_SERVER="socks5://127.0.0.1:1080"
-            echo "using proxy: socks5://127.0.0.1:1080"
+            for i in 1 2 3; do
+              _exit_ip=$(curl -s --max-time 15 -x socks5h://127.0.0.1:1080 https://api.ipify.org || true)
+              if [ -n "$_exit_ip" ]; then
+                PROXY_SERVER="socks5://127.0.0.1:1080"
+                echo "using proxy: socks5://127.0.0.1:1080 (第 $i 次探測成功, 出口 IP: $_exit_ip)"
+                break
+              fi
+              echo "⚠️ proxy 第 $i 次探測唔通, 3 秒後重試..."
+              sleep 3
+            done
+            if [ -z "$PROXY_SERVER" ]; then
+              echo "⚠️ sing-box 進程存在但代理 3 次都唔通 → 回退直連(唔中斷續期)"
+            fi
           else
-            export PROXY_SERVER=""
             echo "no proxy, direct mode"
           fi
+          export PROXY_SERVER
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 main.py
 
       - name: 📸 上傳截圖
