@@ -1,33 +1,207 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""1cehost（dash.icehost.pl）自动续期 —— 已迁移到 renew-kit。
+
+公共部分（结果语义 / 报告排版 / TG 通知 / 退出码 / 环境变量读取）交给 renewkit，
+本文件只保留 1cehost 自己的业务：Cookie 注入 → 过 CF 盾 → 密码登录兜底 →
+点「ADD 6 HOURS VALIDITY」→ 用到期时间差验证真的加了 6 小时。
+
+迁移带来的行为变化（每一条都是实盘日志推出来的，不是拍脑袋）：
+
+1. 「未到窗口」不再靠猜。实盘（#237 / #239）显示：窗口没开时续期按钮
+   **照样在页面上**，真正的信号是**点击之后**弹出的红框。所以点击前只用
+   语义明确的强特征把关，宽松特征留到点击后作佐证 —— 漏判只是多点一次
+   （面板会再弹红框，无害），误判却会让脚本永远不点，服务器到期被
+   suspend（不可逆）。方向上宁可多点是刻意的。
+
+2. 到期时间读不到时**照点**。按钮在不在不是窗口信号，把「读不到到期时间」
+   当成「窗口没开」会直接漏点（就是上面那条的后果）。读不到就点，事后用
+   UNKNOWN 如实上报。注意这条与 aclclouds 的取舍相反：那边按钮语义模糊，
+   读不到剩余天数就不点；这边按钮语义明确，不点才是错。
+
+3. 跳过时**不发 TG**。本仓是每小时 cron，窗口没开是常态，一天 48 条垃圾
+   消息没人受得了。只有 续期成功 / 已达上限 / 结果未确认 / 真失败 才打扰人。
+
+4. 截图不再「发完就删」。原实现发完 TG 立刻 os.remove，导致同一次运行的
+   upload-artifact 永远找不到文件（if-no-files-found: ignore 静默吞掉），
+   等于排障产物一直是空的。现在截图留在工作目录，交给 action 上传。
+
+5. 退出码收敛成两档：0 正常（含跳过、上游抖动）、1 真失败需人工。
+   原来是 1/2/3 三种散落的 sys.exit，而 workflow 只看「非零」，分不出轻重，
+   也没法把「上游 5xx」和「Cookie 失效」区分开。
+
+6. WAF / CF 拦截单独识别。面板靠 session cookie **存在与否**放行（不验有效性），
+   所以「WAF - Block」= Cookie 缺失或失效 → FAILED，要人换 ICEHOST_COOKIES；
+   Cloudflare 挑战页 → TRANSIENT，下次排程重试即可。
+
+用法（环境变量）：
+    ICEHOST_SERVER_URL                面板地址（必填）
+    ICEHOST_COOKIES                   Cookie：JSON 数组 / JSON 对象 / Cookie 头文本
+    ICEHOST_EMAIL / ICEHOST_PASSWORD  Cookie 失效时的兜底登录
+    ICEHOST_ACCOUNT_NAME              账号标签，只影响通知里的显示名
+    PROXY_SERVER                      可选，如 socks5://127.0.0.1:1080
+    TG_BOT_TOKEN / TG_CHAT_ID         可选
+    DRY_RUN=1                         只检查不点击
+"""
+from __future__ import annotations
+
 import json
 import os
 import re
-import time
+import sys
 import urllib.parse
-import requests
-# 引入 SeleniumBase 高级过盾包
-from seleniumbase import SB
+import urllib.request
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 
-SERVER_URL = os.getenv("ICEHOST_SERVER_URL")
-ICEHOST_COOKIES = os.getenv("ICEHOST_COOKIES")
-ICEHOST_EMAIL = os.getenv("ICEHOST_EMAIL", "")
-ICEHOST_PASSWORD = os.getenv("ICEHOST_PASSWORD", "")
-ACCOUNT_NAME = os.getenv("ICEHOST_ACCOUNT_NAME", "")
-PROXY_SERVER = os.getenv("PROXY_SERVER", "")
+from renewkit import Outcome, RenewReport
+from renewkit import env
+from renewkit import notify
+from renewkit.report import shorten
 
-SERVICE_NAME = "1cehost"
+SERVICE = "1cehost"
+DEFAULT_DOMAIN = "dash.icehost.pl"
+
+SERVER_URL = env.get("ICEHOST_SERVER_URL")
+COOKIES_RAW = env.get("ICEHOST_COOKIES")
+EMAIL = env.get("ICEHOST_EMAIL")
+PASSWORD = env.get("ICEHOST_PASSWORD")
+ACCOUNT = env.get("ICEHOST_ACCOUNT_NAME")
+PROXY_SERVER = env.get("PROXY_SERVER")
+DRY_RUN = env.dry_run()
+
+#: 面板一次续期 +6 小时；容差给到 5~9 小时，既容得下服务端取整/时区抖动，
+#: 又能把「时间没变」「跳了几天」这类异常排除掉。
+EXTEND_MIN_S = env.get_int("ICEHOST_EXTEND_MIN_S", 5 * 3600)
+EXTEND_MAX_S = env.get_int("ICEHOST_EXTEND_MAX_S", 9 * 3600)
+
+#: 点击后等红框渲染的时间，以及刷新后等 SPA 重新拉数据的时间
+CLICK_WAIT_S = env.get_int("ICEHOST_CLICK_WAIT_S", 5)
+REFRESH_WAIT_S = env.get_int("ICEHOST_REFRESH_WAIT_S", 5)
+
+SHOT_DIR = env.get("ICEHOST_SHOT_DIR", ".") or "."
+SHOT_NAME = "run_screenshot.png"
+
+#: 续期按钮：兼容 ADD 6 HOURS VALIDITY / Dodaj 6 godzin / add 6
+#: XPath 里 translate() 把小写化做进表达式，所以大小写怎么写都能命中
+RENEW_BTN_XPATH = (
+    "//*[not(*) and ("
+    "contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add 6 hours')"
+    " or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'dodaj 6')"
+    " or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add 6')"
+    ")]"
+)
 
 
-def now_local():
-    """UTC+8 當地時間 MM-DD HH:MM（runner 係 UTC）"""
-    return time.strftime("%m-%d %H:%M", time.gmtime(time.time() + 8 * 3600))
+# ────────────────────────── 纯逻辑（不碰浏览器，可离线单测） ──────────────────────────
+
+#: Cookie 里必须有这两条：session 是 WAF 的「放行牌」，XSRF 是 XHR 的 CSRF 凭据
+REQUIRED_COOKIES = ("icehostpl_session", "XSRF-TOKEN")
 
 
-def fmt_exp(value):
-    """到期時間 'YYYY-MM-DD HH:MM' → 'MM-DD HH:MM'（讀唔到就回 '讀唔到'）"""
+def parse_cookies(raw: str, *, domain: str = DEFAULT_DOMAIN) -> list[dict]:
+    """把 Secret 里的 Cookie 解析成 SeleniumBase ``add_cookie`` 能吃的 dict 列表。
+
+    支持三种写法（实测三种都有人填）：
+      · JSON 数组   ``[{"name": "icehostpl_session", "value": "..."}, ...]``
+      · JSON 对象   ``{"cookies": [...]}``，或直接 ``{"icehostpl_session": "...", ...}``
+      · Cookie 头   ``icehostpl_session=...; XSRF-TOKEN=...``
+
+    解析结果必须同时含 session 与 XSRF，否则抛 :class:`ValueError` 并说明缺了哪个
+    —— 原实现在缺 XSRF 时报「Cookie 缺少: XSRF-TOKEN」，比笼统的「格式错误」好定位。
+    """
+    text = (raw or "").strip()
+    if not text:
+        raise ValueError("Cookie 为空")
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = None
+
+    entries: list | None
+    if isinstance(data, list):
+        entries = data
+    elif isinstance(data, dict) and isinstance(data.get("cookies"), list):
+        entries = data["cookies"]
+    elif isinstance(data, dict):
+        # 顶层直接当 name -> value（手抄 JSON 最常见）
+        entries = [{"name": k, "value": v} for k, v in data.items()
+                   if isinstance(v, (str, int, float))]
+    else:
+        entries = None
+
+    pairs: dict[str, str] = {}
+    if entries is not None:
+        for c in entries:
+            if isinstance(c, dict) and c.get("name"):
+                pairs[str(c["name"])] = str(c.get("value", ""))
+    else:
+        for part in text.split(";"):
+            if "=" in part:
+                name, value = part.strip().split("=", 1)
+                pairs[name.strip()] = value.strip()
+
+    missing = [n for n in REQUIRED_COOKIES if not pairs.get(n)]
+    if missing:
+        raise ValueError("Cookie 缺少: " + ", ".join(missing))
+
+    return [
+        {
+            "name": name,
+            # Laravel 的 XSRF-TOKEN 是 base64 再 URL 编码，Cookie 头里抄来的一定是
+            # 编码态；unquote 对不含 %xx 的字符串本来就是恒等操作，所以统一解一次
+            # 既照顾了 Cookie 头来源，也不会破坏已经解码过的 JSON 来源。
+            "value": urllib.parse.unquote(pairs[name]),
+            "domain": domain,
+            "path": "/",
+            "secure": True,
+        }
+        for name in REQUIRED_COOKIES
+    ]
+
+
+#: 到期时间的标签，中/英/波兰三种语言都见得到。
+#:
+#: 标签与时间之间用「最多 60 个字符、且中途不许出现另一个日期」的填充来兜住 ——
+#: 这样取到的一定是紧跟标签的那个时间。别改成 `[^0-9]{0,40}`：那连 `<h3>` 里的
+#: 那个 3 都会把匹配卡死（`</h3>` 第一个数字就是 3），页面换个标签名就静默读不到
+#: 到期时间 —— 而这正是「该不该点」的依据。
+_GAP = r"(?:(?!\d{4}-\d{2}-\d{2}).){0,60}"
+_EXP_RE = re.compile(
+    r"(EXPIRATION DATE|Data wygaśnięcia|到期日|expiry)" + _GAP +
+    r"(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(?::\d{2})?)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def find_expiry(page_source: str) -> str | None:
+    """从页面源码里抠出到期时间，读不到返回 None。"""
+    m = _EXP_RE.search(page_source or "")
+    return m.group(2) if m else None
+
+
+def parse_expiry_dt(value: str | None) -> datetime | None:
+    """``2026-10-02 18:03`` / ``2026-10-02T18:03`` / 带秒 / 只到日 → datetime。"""
+    if not value:
+        return None
+    s = str(value).strip().replace("T", " ")
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(s, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def fmt_exp(value: str | None) -> str:
+    """``2026-10-02 18:03`` → ``10-02 18:03``；读不到给「讀唔到」。"""
     if not value:
         return "讀唔到"
     text = str(value)
-    m = re.match(r"(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})", text)
+    m = re.match(r"(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})", text)
     if m:
         return f"{m.group(2)}-{m.group(3)} {m.group(4)}:{m.group(5)}"
     m = re.match(r"(\d{4})-(\d{2})-(\d{2})", text)
@@ -36,524 +210,450 @@ def fmt_exp(value):
     return text[:16]
 
 
-def build_notice(account, status, detail=None, warn=False, ok=0, skip=0, bad=0):
-    """方案 B (極致精簡人話版): 每台精準兩行，徹底消滅頂部計數器"""
-    name = f"{SERVICE_NAME}（{account}）" if account and account != "默認帳號" else SERVICE_NAME
-    s = (status or "").strip()
-    
-    if ok or s.startswith("✅"):
-        exp_str = f"至 {detail}" if detail and "前" not in detail else ""
-        if not exp_str and "→" in s:
-            exp_str = "至 " + s.split("→")[-1].strip()
-        l1 = f"✅ {name} · 成功續期" + (f" {exp_str}" if exp_str else "")
-        l2 = "ℹ️ 服務已自動展期"
-        return f"{l1}\n{l2}"
-    elif bad or s.startswith("❌"):
-        l1 = f"🚨 {name} · 續期未完成"
-        err = s.lstrip("❌").strip()
-        if detail:
-            err = f"{err}（{detail}）"
-        l2 = f"⚠️ {err} · 請登入面板手動處理"
-        return f"{l1}\n{l2}"
-    else: # skip / 狀態良好
-        l1 = f"🟢 {name} · 狀態良好"
-        info_parts = []
-        if detail:
-            info_parts.append(detail if "到期" in detail else f"{detail} 到期")
-        info_parts.append("未到續期窗口")
-        l2 = "ℹ️ " + " · ".join(info_parts)
-        return f"{l1}\n{l2}"
+def extend_ok(before: str | None, after: str | None,
+              *, lo: int = EXTEND_MIN_S, hi: int = EXTEND_MAX_S) -> bool:
+    """续期前后到期时间差落在 ``[lo, hi]`` 秒内才算真续上。
+
+    只看「变了没有」不够：面板出错也可能把时间改掉。卡住 5~9 小时这个窗口，
+    既认得出正常的 +6h，也能把「没变」和「跳了几天」都排除。
+    """
+    a, b = parse_expiry_dt(before), parse_expiry_dt(after)
+    if a is None or b is None:
+        return False
+    return lo <= (b - a).total_seconds() <= hi
 
 
-def send_tg_notification(message, photo_path=None):
-    """发送结果和截图至 Telegram，并在发送后清理本地截图文件"""
-    token = os.getenv("TG_BOT_TOKEN")
-    chat_id = os.getenv("TG_CHAT_ID")
+#: 未到窗口时面板弹的红框文案。刻意分强弱两档：
+#:  · STRONG 语义明确指向「不能续期」，点击前也用它把关
+#:  · WEAK 里的词（recently / next 6 hours）可能出现在无关文案里，
+#:    只在点击后当佐证 —— 误判的代价是永远不点，服务器被 suspend，不可逆
+LIMIT_STRONG = (
+    "nie możesz przedłużyć",
+    "niedawno to zrobiłeś",
+    "cannot extend",
+)
+LIMIT_WEAK = (
+    "kolejne 6 godziny",
+    "next 6 hours",
+    "recently",
+)
+
+
+def has_limit_notice(page_source: str, *, strong_only: bool = False) -> bool:
+    """页面是否提示「未到可续期时间」。默认含弱特征，点击前请传 strong_only=True。"""
+    low = (page_source or "").lower()
+    if any(k in low for k in LIMIT_STRONG):
+        return True
+    if strong_only:
+        return False
+    return any(k in low for k in LIMIT_WEAK)
+
+
+#: 面板前面的 WAF / Cloudflare 特征（与 probe.py 的判据保持一致）
+WAF_MARKERS = ("connection blocked", "blocked on our waf", "zablokowane", "waf - block")
+CF_MARKERS = ("just a moment", "challenges.cloudflare.com", "cf-turnstile", "cf-chl")
+
+
+def classify_page(page_source: str) -> tuple[Outcome | None, str]:
+    """页面级拦截识别。命中返回 ``(结论, 说明)``，没命中返回 ``(None, "")``。
+
+    WAF 放行只验 session cookie「存在」不验「有效」，所以「WAF - Block」等价于
+    Cookie 没了 → FAILED 要人换；CF 挑战页只是没过了盾，换次排程可能就过 → TRANSIENT。
+    """
+    low = (page_source or "").lower()
+    if any(m in low for m in WAF_MARKERS):
+        return Outcome.FAILED, "面板 WAF 拦截出口（Cookie 缺失或失效，请更新 ICEHOST_COOKIES）"
+    if any(m in low for m in CF_MARKERS):
+        return Outcome.TRANSIENT, "Cloudflare 挑战页未过"
+    return None, ""
+
+
+LOGIN_MARKERS = ("zaloguj", "logowanie", "sign in", "log in",
+                 "remember me", "zapamiętaj mnie", "forgot password")
+
+
+def looks_logged_out(url: str, page_source: str, has_password_field: bool) -> bool:
+    """Cookie 是否已失效。
+
+    判据分两档：URL 带 login、页面上真的渲染出密码框 —— 这两条是硬证据；
+    文案关键词只在 SPA 不换 URL 时兜底，所以放最后。
+    """
+    if "login" in (url or "").lower():
+        return True
+    if has_password_field:
+        return True
+    low = (page_source or "").lower()
+    return any(m in low for m in LOGIN_MARKERS)
+
+
+def decide(before: str | None, after: str | None, *,
+           limited_before: bool = False, limited_after: bool = False,
+           lo: int = EXTEND_MIN_S, hi: int = EXTEND_MAX_S) -> tuple[Outcome, str]:
+    """点击前后的观测 → ``(结论, 说明)``。
+
+    抽成纯函数是为了把「红框出现在点击前还是点击后」「到期时间读不到」
+    「时间没变」「时间跳了几天」这些组合全都能离线测一遍 —— 浏览器里的分支
+    靠人工点不出来。
+    """
+    if limited_before:
+        return Outcome.SKIPPED, "未到续期窗口"
+    if extend_ok(before, after, lo=lo, hi=hi):
+        return Outcome.RENEWED, ""
+    if limited_after:
+        return Outcome.SKIPPED, "未到续期窗口（点击后弹出限制提示）"
+    if before and after and before == after:
+        return Outcome.SKIPPED, "到期时间没变，未到续期窗口"
+    if before and after:
+        return Outcome.UNKNOWN, f"到期时间异常：{fmt_exp(before)} → {fmt_exp(after)}"
+    return Outcome.UNKNOWN, f"{fmt_exp(before)} → {fmt_exp(after)}，未能确认结果"
+
+
+#: 静默的结果：这两种不打扰人（未到窗口是常态；上游抖动等下次排程即可）
+QUIET_OUTCOMES = frozenset({Outcome.SKIPPED, Outcome.TRANSIENT})
+
+
+def should_notify(report: RenewReport) -> bool:
+    """本仓每小时跑一次，窗口没开就静默 —— 否则一天能刷 48 条 TG。"""
+    return any(r.outcome not in QUIET_OUTCOMES for r in report.results)
+
+
+def multipart_body(fields: dict[str, str], file_field: str, filename: str,
+                   content: bytes, boundary: str) -> bytes:
+    """拼一个 multipart/form-data 请求体（纯函数，方便单测）。"""
+    out = bytearray()
+    for key, value in fields.items():
+        out += f"--{boundary}\r\n".encode()
+        out += f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode()
+        out += str(value).encode("utf-8") + b"\r\n"
+    out += f"--{boundary}\r\n".encode()
+    out += (f'Content-Disposition: form-data; name="{file_field}"; '
+            f'filename="{filename}"\r\n').encode()
+    out += b"Content-Type: image/png\r\n\r\n"
+    out += content + b"\r\n"
+    out += f"--{boundary}--\r\n".encode()
+    return bytes(out)
+
+
+def send_photo(path: str, caption: str) -> bool:
+    """把截图发到 TG。失败只打印 —— 通知出问题绝不能影响续期结论。"""
+    token, chat_id = notify.config()
     if not token or not chat_id:
-        print("未配置 TG 机器人变量，跳过发送 TG 推送。")
-        return
-
-    # 1. 发送文本消息
+        return False
     try:
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {
-            "chat_id": chat_id,
-            "text": message,
-            "parse_mode": "HTML",
-        }
-        requests.post(url, json=payload, timeout=15)
-        print("TG 状态通知发送成功。")
-    except Exception as e:
-        print(f"发送 TG 消息异常: {e}")
+        content = Path(path).read_bytes()
+    except OSError as exc:
+        print(f"   ⚠️ 读不到截图 {path}: {exc}", flush=True)
+        return False
 
-    # 2. 发送截图文件并自动清理
-    if photo_path and os.path.exists(photo_path):
-        try:
-            url = f"https://api.telegram.org/bot{token}/sendPhoto"
-            with open(photo_path, "rb") as f:
-                files = {"photo": f}
-                data = {"chat_id": chat_id, "caption": "📸 实时画面"}
-                requests.post(url, data=data, files=files, timeout=20)
-            print("TG 截图发送成功。")
-        except Exception as e:
-            print(f"发送 TG 截图异常: {e}")
-        finally:
-            # 推送完毕后删除本地截图文件，保持环境整洁
+    boundary = "----renewkit" + uuid.uuid4().hex
+    body = multipart_body({"chat_id": chat_id, "caption": caption},
+                          "photo", Path(path).name, content, boundary)
+    req = urllib.request.Request(
+        f"https://api.telegram.org/bot{token}/sendPhoto",
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            ok = bool(json.loads(resp.read().decode("utf-8", "replace")).get("ok"))
+    except Exception as exc:
+        print(f"   ⚠️ TG 截图发送异常: {exc}", flush=True)
+        return False
+    print("   📸 截图已发 TG" if ok else "   ⚠️ TG 截图被拒", flush=True)
+    return ok
+
+
+# ────────────────────────── 浏览器流程 ──────────────────────────
+
+
+@dataclass
+class RunResult:
+    outcome: Outcome
+    detail: str = ""
+    expire: str | None = None
+    shot: str | None = None
+    extra: dict = field(default_factory=dict)
+
+
+def _shoot(sb, path: str) -> str | None:
+    """截图，失败就算了（排障产物而已，不该把续期拖挂）。"""
+    try:
+        sb.save_screenshot(path)
+        return path
+    except Exception as exc:
+        print(f"   ⚠️ 截图失败: {exc}", flush=True)
+        return None
+
+
+def _visible(sb, selector: str) -> bool:
+    try:
+        return bool(sb.is_element_visible(selector))
+    except Exception:
+        return False
+
+
+def _dump_page(sb) -> None:
+    """找不到续期按钮时把现场 dump 出来，省得对着「失败」两个字干瞪眼。"""
+    try:
+        print(f"[DIAG] 当前 URL: {sb.get_current_url()}", flush=True)
+        buttons = sb.find_elements(
+            "button, a.btn, input[type=submit], a[href*='renew'], a[href*='extend']")
+        print(f"[DIAG] 页面共 {len(buttons)} 个按钮/链接候选:", flush=True)
+        for b in buttons[:40]:
             try:
-                if os.path.exists(photo_path):
-                    os.remove(photo_path)
-                    print(f"临时截图文件 {photo_path} 已自动清理。")
-            except Exception as e:
-                print(f"清理临时截图文件失败: {e}")
+                text = (b.text or b.get_attribute("value") or "").strip().replace("\n", " ")[:60]
+                print(f"[DIAG]   <{b.tag_name}> {text!r} href={(b.get_attribute('href') or '')[:80]}",
+                      flush=True)
+            except Exception:
+                pass
+        source = sb.get_page_source() or ""
+        visible = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", source, flags=re.S | re.I)
+        visible = re.sub(r"<[^>]+>", " ", visible)
+        visible = re.sub(r"\s+", " ", visible)
+        print(f"[DIAG] 页面可见文字(前1200字): {visible[:1200]}", flush=True)
+    except Exception as exc:
+        print(f"[DIAG] dump 失败: {exc}", flush=True)
 
 
-def run():
-    if not SERVER_URL:
-        print("错误: 缺少 ICEHOST_SERVER_URL 环境变量")
-        raise SystemExit(2)
-    if not ICEHOST_COOKIES and not (ICEHOST_EMAIL and ICEHOST_PASSWORD):
-        print("错误: 缺少 ICEHOST_COOKIES,且未配置 ICEHOST_EMAIL/ICEHOST_PASSWORD,无法续期")
-        raise SystemExit(2)
-    if not ICEHOST_COOKIES:
-        print("提示: 无 Cookie,将直接使用账户密码登录。")
+def _password_login(sb, shot: str) -> tuple[bool, str]:
+    """Cookie 失效时的兜底：用账号密码登。
 
-    # 1. 启动 SeleniumBase 并开启 UC 免密/防检测模式与 Xvfb 虚拟桌面 (xvfb=True)
-    proxy_arg = None
+    两个坑都在这里绕开（实测出来的，不是推测）：
+      · WAF 只验 session cookie「存在」不验「有效」。一旦没有 session cookie
+        就整个 "WAF - Block"。所以要**保留** icehostpl_session（死值也是放行牌），
+        只删 XSRF-TOKEN（死 token 是 "CSRF mismatch" 的元凶），让后端重新派一对。
+      · 用当前页 refresh 而不是新导航到 /auth/login —— 新导航会被 WAF 当新访客
+        直接拦掉，refresh 有概率过。
+    """
+    print("🔑 Cookie 失效，改用账号密码登录…", flush=True)
+    try:
+        for cookie in sb.driver.get_cookies():
+            if cookie.get("name") == "XSRF-TOKEN":
+                try:
+                    sb.driver.delete_cookie(cookie["name"])
+                except Exception:
+                    pass
+        print("   已移除 XSRF-TOKEN（保留 session cookie 作 WAF 放行牌）", flush=True)
+    except Exception as exc:
+        print(f"   移除 XSRF cookie 异常: {exc}", flush=True)
+
+    try:
+        sb.refresh()
+        sb.sleep(10)
+    except Exception as exc:
+        print(f"   refresh 异常: {exc}", flush=True)
+
+    # 表单没渲染就别盲填 —— 空页面上填不出登录，只会拿到一个看不懂的失败
+    form_ready = False
+    for _ in range(3):
+        if _visible(sb, "input[type='password']"):
+            form_ready = True
+            break
+        sb.sleep(5)
+    if not form_ready:
+        print(f"   登录表单未渲染。URL: {sb.get_current_url()}", flush=True)
+        _dump_page(sb)
+        return False, "登录页异常：表单没渲染（CF 盾未过或页面结构变动）"
+
+    try:
+        sb.uc_gui_click_captcha()
+        sb.sleep(10)
+    except Exception as exc:
+        print(f"   登录页验证盾处理异常（可忽略）: {exc}", flush=True)
+
+    # email 栏实测是 input[name='username'](type=text)，其余按常见写法兜底
+    email_locators = ["input[name='username']", "input[type='text']",
+                      "input[name='email']", "input[type='email']"]
+    filled = False
+    for loc in email_locators:
+        try:
+            sb.update_text(loc, EMAIL)
+            print(f"   email 栏已填（{loc}）", flush=True)
+            filled = True
+            break
+        except Exception:
+            continue
+    if not filled:
+        try:
+            for el in sb.find_elements("input"):
+                itype = (el.get_attribute("type") or "text").lower()
+                if itype in ("password", "checkbox", "radio", "hidden", "submit", "button", "file"):
+                    continue
+                sb.update_text(el, EMAIL)
+                print(f"   通用 fallback 已填 email（name={el.get_attribute('name')!r}）", flush=True)
+                filled = True
+                break
+        except Exception as exc:
+            print(f"   通用 fallback 失败: {exc}", flush=True)
+    if not filled:
+        print("   ⚠️ 找不到 email 输入栏，只填密码（多半会失败）", flush=True)
+
+    try:
+        sb.update_text("input[type='password']", PASSWORD)
+        sb.sleep(2)
+        try:
+            sb.click('button[type="submit"]')
+        except Exception:
+            try:
+                sb.click('input[type="submit"]')
+            except Exception:
+                sb.press_keys('input[type="password"]', "\n")
+        sb.sleep(15)
+        _shoot(sb, shot)
+    except Exception as exc:
+        return False, f"密码登录过程异常：{shorten(str(exc), 100)}"
+
+    url = sb.get_current_url()
+    source = sb.get_page_source()
+    if looks_logged_out(url, source, _visible(sb, "input[type='password']")):
+        errors = re.findall(
+            r"(?:alert|error|invalid|invalid-feedback|text-danger|danger|warning|form-text|message)"
+            r"[^>]*>([^<]{4,120})", source or "", re.I)
+        print(f"   登录后 URL: {url}", flush=True)
+        print(f"   页面错误提示: {errors[:10]}", flush=True)
+        return False, "密码登录后仍停在登录页（查 ICEHOST_EMAIL/PASSWORD 或人机验证）"
+    return True, ""
+
+
+def run_browser() -> RunResult:
+    """跑一遍完整流程。返回结论，不抛异常（异常由调用方兜）。"""
+    from seleniumbase import SB  # 延迟导入：没装 seleniumbase 时也能跑单测
+
+    sb_kwargs: dict = {"uc": True, "xvfb": True}
     if PROXY_SERVER:
-        print(f"使用代理: {PROXY_SERVER}")
-        proxy_arg = PROXY_SERVER
-    with SB(uc=True, xvfb=True, proxy=proxy_arg) as sb:
-        print(f"正在访问面板: {SERVER_URL}")
+        print(f"🌐 使用代理: {PROXY_SERVER}", flush=True)
+        sb_kwargs["proxy"] = PROXY_SERVER
+
+    shot = os.path.join(SHOT_DIR, SHOT_NAME)
+
+    with SB(**sb_kwargs) as sb:
+        print(f"🌐 访问面板: {SERVER_URL}", flush=True)
         sb.uc_open_with_reconnect(SERVER_URL, reconnect_time=8)
         sb.sleep(5)
 
-        # 2. 注入 Cookies（智能兼容 JSON 或纯文本格式）
-        if ICEHOST_COOKIES:
+        # 1) 先看出口有没有被 WAF/CF 拦 —— 被拦时连登录页都到不了，后面全是噪声
+        blocked, why = classify_page(sb.get_page_source())
+        if blocked is not None:
+            return RunResult(blocked, why, shot=_shoot(sb, shot))
+
+        # 2) 注入 Cookie
+        cookies: list[dict] = []
+        if COOKIES_RAW:
             try:
-                cookies_to_add = []
-                raw_cookies_str = ICEHOST_COOKIES.strip()
-
-                # 尝试一：如果 Secret 填的是标准的 JSON 格式
-                try:
-                    raw_data = json.loads(raw_cookies_str)
-                    if isinstance(raw_data, list):
-                        cookies_to_add = raw_data
-                    elif isinstance(raw_data, dict):
-                        cookies_to_add = raw_data.get("cookies", [])
-                    required = {"icehostpl_session", "XSRF-TOKEN"}
-                    present = {str(c.get("name")) for c in cookies_to_add if isinstance(c, dict)}
-                    if not required.issubset(present):
-                        missing = ", ".join(sorted(required - present))
-                        raise ValueError(f"JSON Cookie 缺少: {missing}")
-                    print("检测到 JSON 格式 Cookie，正在解析（session/XSRF 已核对）...")
-
-                # 尝试二：如果解析失败，解析 Cookie header / KEY=value 文本
-                except json.JSONDecodeError:
-                    print(
-                        "检测到纯文本 Cookie 格式，正在自动提取并生成标准字段..."
-                    )
-
-                    # 支持 `name=value; name2=value2`，避免把 XSRF 值误当 session
-                    pairs = {}
-                    for part in raw_cookies_str.split(";"):
-                        if "=" in part:
-                            name, value = part.strip().split("=", 1)
-                            pairs[name.strip()] = value.strip()
-                    cookies_to_add = [
-                        {"name": name, "value": pairs[name], "domain": "dash.icehost.pl"}
-                        for name in ("icehostpl_session", "XSRF-TOKEN")
-                        if pairs.get(name)
-                    ]
-                    if not cookies_to_add:
-                        raise ValueError("纯文本 Cookie 中未找到 icehostpl_session/XSRF-TOKEN")
-
-                # 统一执行转换与注入
-                for c in cookies_to_add:
-                    raw_value = c["value"]
-                    decoded_value = urllib.parse.unquote(raw_value)
-
-                    cookie_dict = {
-                        "name": c["name"],
-                        "value": decoded_value,
-                        "domain": c.get("domain", "dash.icehost.pl"),
-                        "path": c.get("path", "/"),
-                        "secure": c.get("secure", True),
-                    }
-                    if "sameSite" in c:
-                        ss = str(c["sameSite"]).lower()
-                        if ss in ["lax", "strict", "none"]:
-                            cookie_dict["sameSite"] = ss.capitalize()
-
-                    sb.add_cookie(cookie_dict)
-
-                print("Cookie 成功注入！")
-
-                # 重新刷新加载，应用 Cookie
+                cookies = parse_cookies(COOKIES_RAW)
+            except ValueError as exc:
+                print(f"⚠️ Cookie 不可用（将只用账号密码登录）: {exc}", flush=True)
+        if cookies:
+            try:
+                for c in cookies:
+                    sb.add_cookie(c)
+                print("🍪 Cookie 已注入，刷新应用…", flush=True)
                 sb.refresh()
                 sb.sleep(5)
-            except Exception as e:
-                print(f"注入 Cookie 过程中发生异常: {e}")
-                raise SystemExit(2)
+            except Exception as exc:
+                print(f"⚠️ 注入 Cookie 异常（改用密码登录）: {exc}", flush=True)
 
-        # 3. 核心过盾：自动寻找并执行系统级物理点击过 Cloudflare Turnstile 验证盾
-        sb.save_screenshot("run_screenshot.png")
+        # 3) 过 CF 盾：系统级物理点击，SeleniumBase UC 模式的看家本事
+        _shoot(sb, shot)
         try:
-            print(
-                "正在检测并调用系统级 PyAutoGUI 驱动，物理点击 Cloudflare"
-                " 人机验证码..."
-            )
-            # 在虚拟桌面上定位验证框并模拟发送系统硬件级点击事件
+            print("🖱️ 尝试物理点击 Cloudflare 人机验证…", flush=True)
             sb.uc_gui_click_captcha()
-            sb.sleep(10)  # 给予 10 秒跳转缓冲
-            sb.save_screenshot("run_screenshot.png")
-        except Exception as e:
-            print(f"验证盾已被跳过或点击执行完毕: {e}")
+            sb.sleep(10)
+            _shoot(sb, shot)
+        except Exception as exc:
+            print(f"ℹ️ 验证盾跳过或已处理: {exc}", flush=True)
 
-        # 4. 判断登录状态
-        current_url = sb.get_current_url()
-        page_src_login = sb.get_page_source()
-        # 多重判据：URL、登入表单、页面文字；任一命中即视为 cookie 失效
-        login_markers = [
-            "Zaloguj", "Logowanie", "Sign in", "Log in",
-            "Remember me", "Zapamiętaj mnie", "Forgot password",
-        ]
-        cookie_dead = (
-            "login" in current_url
-            or sb.is_element_visible("input[type='email']")
-            or sb.is_element_visible("input[type='password']")
-            or any(m in page_src_login for m in login_markers)
-        )
-        if cookie_dead:
-            # 新增:Cookie 失效時,若已配置賬戶密碼,自動轉密碼登入
-            if ICEHOST_EMAIL and ICEHOST_PASSWORD:
-                print("Cookie 失效,嘗試用賬戶密碼登入...")
-                # 關鍵修(六輪實測): WAF 只驗 session cookie「存在」唔驗「有效」
-                # (Run 34151573065: 死 session 都照渲染表單), 一旦冇 session
-                # cookie 就 "WAF - Block"。所以:
-                #   1. 保留 icehostpl_session(死值都係 WAF 放行牌)
-                #   2. 只刪 XSRF-TOKEN(死 token 係 "CSRF mismatch" 元兇)
-                #   3. refresh 後後端派新 session+新 XSRF, 登入 XHR 就能過 CSRF
-                try:
-                    for c in sb.driver.get_cookies():
-                        if c.get("name") == "XSRF-TOKEN":
-                            try:
-                                sb.driver.delete_cookie(c["name"])
-                            except Exception:
-                                pass
-                    print("已移除 XSRF-TOKEN(保留 session cookie 作 WAF 放行牌)。")
-                except Exception as e:
-                    print(f"移除 XSRF cookie 異常: {e}")
-                # 用原頁 refresh 而唔係新導航: 新導航 /auth/login 會被 WAF 判做
-                # 新訪客直接 "WAF - Block"(Run 34152836486 實測), refresh 有機會過
-                try:
-                    sb.refresh()
-                    sb.sleep(10)
-                except Exception as e:
-                    print(f"refresh 異常: {e}")
-                # 確認登入表單真係渲染咗,否則 dump 頁面狀態即失敗(唔好喺空页面盲填)
-                pw_visible = False
-                for _attempt in range(3):
-                    try:
-                        sb.wait_for_element_visible("input[type='password']", timeout=10)
-                        pw_visible = True
-                        break
-                    except Exception:
-                        sb.sleep(5)
-                if not pw_visible:
-                    _url = sb.get_current_url()
-                    _src = sb.get_page_source()
-                    print(f"登入表單未顯示。URL: {_url}")
-                    print("=== PAGE SOURCE DUMP ===")
-                    print(_src[:2500])
-                    print("=== END PAGE SOURCE ===")
-                    sb.save_screenshot("run_screenshot.png")
-                    send_tg_notification(
-                        build_notice(
-                            ACCOUNT_NAME,
-                            "❌ 登入頁異常:表單冇渲染（CF 盾／頁面結構變動）",
-                            warn=True, bad=1),
-                        "run_screenshot.png")
-                    raise SystemExit(3)
-                try:
-                    sb.uc_gui_click_captcha()
-                    sb.sleep(10)
-                except Exception as e:
-                    print(f"登入頁驗證盾處理異常(可忽略): {e}")
-                try:
-                    # 實測 DOM: email 欄 = input[name='username'](type=text), 其餘 fallback
-                    email_locators = [
-                        "input[name='username']",
-                        "input[type='text']",
-                        "input[name='email']",
-                        "input[type='email']",
-                    ]
-                    filled_email = False
-                    for loc in email_locators:
-                        try:
-                            sb.update_text(loc, ICEHOST_EMAIL)
-                            print(f"email 欄已填({loc})。")
-                            filled_email = True
-                            break
-                        except Exception:
-                            continue
-                    if not filled_email:
-                        # 通用 fallback: 搵第一個可见嘅非 password/checkbox/radio/hidden input
-                        try:
-                            print("通用 fallback: 列出所有 input...")
-                            for el in sb.find_elements("input"):
-                                _t = (el.get_attribute("type") or "text").lower()
-                                if _t in ("password", "checkbox", "radio", "hidden", "submit", "button", "file"):
-                                    continue
-                                _nm = (el.get_attribute("name") or "")
-                                _ph = (el.get_attribute("placeholder") or "")
-                                print(f"  候選 input: name={_nm!r} type={_t} placeholder={_ph!r}")
-                                sb.update_text(el, ICEHOST_EMAIL)
-                                print(f"已填 email 入通用 input(name={_nm!r})。")
-                                filled_email = True
-                                break
-                        except Exception as _e2:
-                            print(f"通用 fallback 失敗: {_e2}")
-                    if not filled_email:
-                        print("⚠️ 找不到 email 輸入欄,僅填密碼(可能失敗)。")
-                    sb.update_text("input[type='password']", ICEHOST_PASSWORD)
-                    sb.sleep(2)
-                    try:
-                        sb.click('button[type="submit"]')
-                    except Exception:
-                        # 可能係 input[type=submit] 或者要 Enter
-                        try:
-                            sb.click('input[type="submit"]')
-                        except Exception:
-                            sb.press_keys('input[type="password"]', '\n')
-                    print("已提交登入表單,等待跳轉...")
-                    sb.sleep(15)
-                    sb.save_screenshot("run_screenshot.png")
+        # 4) 登录状态判定
+        blocked, why = classify_page(sb.get_page_source())
+        if blocked is not None:
+            return RunResult(blocked, why, shot=_shoot(sb, shot))
 
-                    # 登入後再次判定是否仍停留在登入頁
-                    cur = sb.get_current_url()
-                    src = sb.get_page_source()
-                    still_login = (
-                        "login" in cur
-                        or sb.is_element_visible("input[type='password']")
-                        or any(m in src for m in login_markers)
-                    )
-                    if not still_login:
-                        print("✅ 密碼登入成功,繼續執行續期流程。")
-                        sb.uc_open_with_reconnect(SERVER_URL, reconnect_time=8)
-                        sb.sleep(5)
-                        # 登入成功,跳過 exit,繼續往下續期
-                    else:
-                        # 失敗時 dump 頁面錯誤訊息(紅字/提示),方便定位
-                        try:
-                            import re as _re3
-                            _err_block = _re3.findall(
-                                r'(?:alert|error|invalid|invalid-feedback|text-danger|danger|warning|form-text|message)[^>]*>([^<]{4,120})',
-                                src, _re3.I)
-                            print(f"登入失敗後 URL: {cur}")
-                            print(f"頁面錯誤提示: {_err_block[:10]}")
-                        except Exception as _e3:
-                            print(f"錯誤 dump 失敗: {_e3}")
-                        msg = build_notice(
-                            ACCOUNT_NAME,
-                            "❌ 密碼登入後仍在登入頁,查 EMAIL/PASSWORD 或人機驗證",
-                            warn=True, bad=1)
-                        print("密碼登入失敗,已發 TG 通知。")
-                        send_tg_notification(msg, "run_screenshot.png")
-                        raise SystemExit(3)
-                except SystemExit:
-                    raise
-                except Exception as e:
-                    print(f"密碼登入過程異常: {e}")
-                    raise SystemExit(3)
-            else:
-                msg = build_notice(
-                    ACCOUNT_NAME,
-                    "❌ Cookie 失效需人手換:F12 抄 icehostpl_session 更新 ICEHOST_COOKIES",
-                    warn=True, bad=1)
-                print("❌ Cookie 已失效,已發 TG 通知要求更換。")
-                send_tg_notification(msg, "run_screenshot.png")
-                # Cookie 失效係真正失敗,回傳非零,避免 Matrix workflow 假綠燈
-                raise SystemExit(2)
-        print("✅ Cookie 有效,登入狀態正常。" )
+        if looks_logged_out(sb.get_current_url(), sb.get_page_source(),
+                            _visible(sb, "input[type='password']")):
+            if not (EMAIL and PASSWORD):
+                return RunResult(
+                    Outcome.FAILED,
+                    "Cookie 已失效，且未配置账号密码（请更新 ICEHOST_COOKIES）",
+                    shot=_shoot(sb, shot))
+            ok, why = _password_login(sb, shot)
+            if not ok:
+                return RunResult(Outcome.FAILED, why, shot=shot)
+            print("✅ 密码登录成功", flush=True)
+            # 登录成功后回到面板首页，避免停在 /auth/login 上找按钮
+            sb.uc_open_with_reconnect(SERVER_URL, reconnect_time=8)
+            sb.sleep(5)
+        else:
+            print("✅ Cookie 有效，登录状态正常", flush=True)
 
-        # 5. 判定波兰语与英语红框限制
-        page_source = sb.get_page_source()
-        keywords = [
-            "Nie możesz przedłużyć",
-            "niedawno to zrobiłeś",
-            "kolejne 6 godziny",
-            "cannot extend",
-            "recently",
-            "next 6 hours",
-        ]
-        is_limited = any(kw in page_source for kw in keywords)
+        # 5) 未到窗口？这里只用强特征 —— 见文件头第 1 条
+        source = sb.get_page_source()
+        before = find_expiry(source)
+        if has_limit_notice(source, strong_only=True):
+            return RunResult(Outcome.SKIPPED, "未到续期窗口", expire=before,
+                             shot=_shoot(sb, shot))
+        print(f"📅 续期前到期时间: {fmt_exp(before)}", flush=True)
 
-        if is_limited:
-            print(
-                "检测到红框限制提示：说明未到可续期时间。结束本次运行（不发送"
-                " Telegram 提醒）。"
-            )
-            return
+        if DRY_RUN:
+            return RunResult(Outcome.SKIPPED, "dry-run：未真正点击续期", expire=before,
+                             shot=_shoot(sb, shot))
 
-        # 6. 安全寻找并点击续期按钮（兼容 ADD 6 HOURS VALIDITY / Dodaj 6 godzin / add 6）
-        renew_btn_selector = "//*[not(*) and (contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add 6 hours') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'dodaj 6') or contains(translate(., 'ABCDEFGHIJKLMNOPQRSTUVWXYZ', 'abcdefghijklmnopqrstuvwxyz'), 'add 6'))]"
-
+        # 6) 点续期按钮
         try:
-            print("正在等待续期按钮加载...")
-            sb.wait_for_element_visible(renew_btn_selector, timeout=15)
+            print("🖱️ 等待续期按钮…", flush=True)
+            sb.wait_for_element_visible(RENEW_BTN_XPATH, timeout=15)
+        except Exception as exc:
+            _dump_page(sb)
+            suspended = "Suspended" in (sb.get_page_source() or "")
+            detail = ("已被停权（Suspended），续期按钮消失，需人工进面板解封（72h 宽限期后删机）"
+                      if suspended else
+                      f"找不到续期按钮（ADD 6 HOURS）：{shorten(str(exc), 100)}")
+            return RunResult(Outcome.FAILED, detail, expire=before, shot=_shoot(sb, shot))
 
-            # 读取续期前到期时间（EXPIRATION DATE），供续期后对比
-            import re as _re
-            _src0 = sb.get_page_source()
-            _m0 = _re.search(r'(EXPIRATION DATE|Data wygaśnięcia|到期日|expiry)[^0-9]{0,40}([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2})', _src0, _re.I | _re.S)
-            _old_exp = _m0.group(2) if _m0 else None
-            print(f"续期前 EXPIRATION DATE: {_old_exp}")
+        print("🖱️ 点击续期按钮…", flush=True)
+        sb.click(RENEW_BTN_XPATH)
+        sb.sleep(CLICK_WAIT_S)          # 等红框渲染，此时页面还没刷新
+        _shoot(sb, shot)
+        limited_after = has_limit_notice(sb.get_page_source())
 
-            print("未检测到限制提示，找到续期按钮，正在点击...")
-            sb.click(renew_btn_selector)
+        sb.refresh()                    # 刷新才能读到服务端更新后的到期时间
+        sb.sleep(REFRESH_WAIT_S)
+        source = sb.get_page_source()
+        after = find_expiry(source)
+        print(f"📅 续期后到期时间: {fmt_exp(after)}", flush=True)
 
-            # ⚡ 点击后，在不刷新页面的前提下，先等待 5 秒让可能弹出的红框提示充分渲染
-            sb.sleep(5)
-            sb.save_screenshot("run_screenshot.png")
+        outcome, detail = decide(before, after, limited_after=limited_after)
+        return RunResult(outcome, detail, expire=after or before, shot=_shoot(sb, shot))
 
-            # 立即读取当前最真实的页面源码（此时若有报错红条，必定还挂在屏幕上）
-            current_source = sb.get_page_source()
-            is_failed_due_to_limit = any(
-                kw in current_source for kw in keywords
-            )
 
-            if is_failed_due_to_limit:
-                print(
-                    "点击后，页面立刻弹出了限制提示：说明未到可续期时间。结束本次运行。"
-                )
-                return
+# ────────────────────────── 入口 ──────────────────────────
 
-            print("点击后未检测到报错红条，正在刷新页面确认续期结果...")
-            sb.refresh()
-            sb.sleep(5)
-            sb.save_screenshot("run_screenshot.png")
 
-            updated_source = sb.get_page_source()
-            is_now_limited = any(kw in updated_source for kw in keywords)
+def main() -> int:
+    report = RenewReport(service=SERVICE)
+    target = f"{SERVICE}（{ACCOUNT}）" if ACCOUNT else SERVICE
 
-            # 读取续期后到期时间并对比，确认真正延长约6小时
-            _m1 = _re.search(r'(EXPIRATION DATE|Data wygaśnięcia|到期日|expiry)[^0-9]{0,40}([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2})', updated_source, _re.I | _re.S)
-            _new_exp = _m1.group(2) if _m1 else None
-            print(f"续期后 EXPIRATION DATE: {_new_exp}")
+    if not SERVER_URL:
+        report.add(target, Outcome.FAILED, detail="缺少 ICEHOST_SERVER_URL")
+        return report.finish()
 
-            from datetime import datetime as _dt
-            def _parse_exp(s):
-                if not s:
-                    return None
-                s = s.replace('T', ' ')
-                for _fmt in ('%Y-%m-%d %H:%M', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d'):
-                    try:
-                        return _dt.strptime(s, _fmt)
-                    except Exception:
-                        continue
-                return None
+    has_fallback_login = bool(EMAIL and PASSWORD)
+    if not COOKIES_RAW and not has_fallback_login:
+        report.add(target, Outcome.FAILED,
+                   detail="缺少 ICEHOST_COOKIES，且未配置 ICEHOST_EMAIL/PASSWORD")
+        return report.finish()
 
-            _confirmed = False
-            if _old_exp and _new_exp:
-                _ot = _parse_exp(_old_exp)
-                _nt = _parse_exp(_new_exp)
-                if _ot and _nt:
-                    _d = (_nt - _ot).total_seconds()
-                    # 正常 +6 小时；允许 5~9 小时容差(18000~32400 秒)
-                    if 18000 <= _d <= 32400:
-                        _confirmed = True
+    try:
+        result = run_browser()
+    except Exception as exc:            # 浏览器/驱动异常
+        result = RunResult(Outcome.FAILED, f"{type(exc).__name__}: {shorten(str(exc), 140)}")
 
-            if _confirmed:
-                msg = build_notice(
-                    ACCOUNT_NAME,
-                    f"✅ 已續期 → {fmt_exp(_new_exp)}",
-                    f"前 {fmt_exp(_old_exp)}",
-                    ok=1)
-                print(msg)
-                send_tg_notification(msg, "run_screenshot.png")
-            elif is_now_limited:
-                print(
-                    "刷新后检测到限制提示：说明未到可续期时间。本次未完成续期。"
-                )
-            elif _old_exp and _new_exp and _old_exp == _new_exp:
-                msg = build_notice(
-                    ACCOUNT_NAME,
-                    "⏭️ 未可續（到期時間冇變）",
-                    f"到期 {fmt_exp(_new_exp)}",
-                    warn=True, skip=1)
-                print(msg)
-                send_tg_notification(msg, "run_screenshot.png")
-            else:
-                msg = build_notice(
-                    ACCOUNT_NAME,
-                    "⏭️ 未可續（未能確認結果）",
-                    f"{fmt_exp(_old_exp)} → {fmt_exp(_new_exp)}",
-                    warn=True, skip=1)
-                print(msg)
-                send_tg_notification(msg, "run_screenshot.png")
+    report.add(target, result.outcome, expire=result.expire, detail=result.detail)
 
-        except Exception as e:
-            print(f"未在页面中找到可用的续期按钮: {e}")
-            # [DIAG] 搵唔到掣唔好淨係報錯——dump 全現場俾 log 分析
-            try:
-                _diag_url = sb.get_current_url()
-                print(f"[DIAG] 當前 URL: {_diag_url}")
-                # 列出頁面所有按鈕/鏈結文字,搵下掣去咗邊
-                _btns = sb.find_elements("button, a.btn, input[type=submit], a[href*='renew'], a[href*='extend']")
-                print(f"[DIAG] 頁面共 {len(_btns)} 個按鈕/鏈結候選:")
-                for _b in _btns[:40]:
-                    try:
-                        _txt = (_b.text or _b.get_attribute("value") or "").strip().replace("\n", " ")[:60]
-                        _tag = _b.tag_name
-                        _href = _b.get_attribute("href") or ""
-                        print(f"[DIAG]   <{_tag}> '{_txt}' href={_href[:80]}")
-                    except Exception:
-                        pass
-                # dump 頁面可見文字摘要(去標籤後前 1200 字),睇下過期版頁面係乜樣
-                import re as _rd
-                _vis = _rd.sub(r'<(script|style)[^>]*>.*?</\1>', ' ', sb.get_page_source(), flags=_rd.S | _rd.I)
-                _vis = _rd.sub(r'<[^>]+>', ' ', _vis)
-                _vis = _rd.sub(r'\s+', ' ', _vis)
-                print(f"[DIAG] 頁面可見文字(前1200字): {_vis[:1200]}")
-                # [DIAG2] suspended 頁偵測: 全量 <a href>(di scan 漏普通 link)+ banner 區 HTML
-                try:
-                    _links = sb.find_elements("a[href]")
-                    print(f"[DIAG2] 全頁 <a href> 共 {len(_links)}:")
-                    for _a in _links[:60]:
-                        try:
-                            _t2 = (_a.text or "").strip().replace("\n", " ")[:60]
-                            _h2 = _a.get_attribute("href") or ""
-                            if _t2 or any(k in _h2 for k in ("renew", "extend", "pay", "opla", "przed", "suspend", "react", "servers")):
-                                print(f"[DIAG2]   <a> '{_t2}' href={_h2[:100]}")
-                        except Exception:
-                            pass
-                    _src_raw = sb.get_page_source()
-                    _mi = _src_raw.find("Suspended")
-                    if _mi >= 0:
-                        _seg = _src_raw[max(0, _mi - 600):_mi + 900]
-                        print(f"[DIAG2] Suspended 區域 HTML:\n{_seg}")
-                    else:
-                        print("[DIAG2] 頁面無 'Suspended' 字眼")
-                except Exception as _de2:
-                    print(f"[DIAG2] dump 失敗: {_de2}")
-            except Exception as _de:
-                print(f"[DIAG] dump 失敗: {_de}")
-            sb.save_screenshot("run_screenshot.png")
-            _issusp = "Suspended" in sb.get_page_source()
-            if _issusp:
-                error_msg = build_notice(
-                    ACCOUNT_NAME,
-                    "❌ 已被停權（Suspended）,續期掣消失,需人手入 panel 解封",
-                    "72h 寬限期後刪機",
-                    warn=True, bad=1)
-            else:
-                error_msg = build_notice(
-                    ACCOUNT_NAME,
-                    "❌ 搵唔到續期掣（ADD 6 HOURS）,可能 WAF 擋／未到窗口",
-                    warn=True, bad=1)
-            send_tg_notification(error_msg, "run_screenshot.png")
-            raise SystemExit(1)
+    if result.outcome is Outcome.FAILED and result.shot:
+        send_photo(result.shot, f"📸 {target} · 排障截图")
+
+    return report.finish(notify_tg=should_notify(report))
 
 
 if __name__ == "__main__":
-    run()
+    sys.exit(main())
