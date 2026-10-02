@@ -30,9 +30,16 @@
    原来是 1/2/3 三种散落的 sys.exit，而 workflow 只看「非零」，分不出轻重，
    也没法把「上游 5xx」和「Cookie 失效」区分开。
 
-6. WAF / CF 拦截单独识别。面板靠 session cookie **存在与否**放行（不验有效性），
-   所以「WAF - Block」= Cookie 缺失或失效 → FAILED，要人换 ICEHOST_COOKIES；
-   Cloudflare 挑战页 → TRANSIENT，下次排程重试即可。
+6. WAF / CF 拦截单独识别，而且**判定点必须在注入 Cookie 之后**。面板靠
+   session cookie「存在与否」放行（不验有效性），首次裸访必然吃 "WAF - Block"，
+   在注入前判定等于每次误报 —— 实盘 #241 就是这么红的：代理、Cookie 都好好的，
+   脚本在注入 Cookie 之前就把自己判死了。
+   注入后仍被拦，再按出口分档（见 classify_page）：
+     · 走了代理还被拦 → 出口 IP 是干净的，那就只剩 cookie 废了这一种解释
+       → FAILED，要人换 ICEHOST_COOKIES；
+     · 直连被拦 → runner 机房 IP 本来就在黑名单里，挂上代理就好 → TRANSIENT，
+       下个小时再试（本仓是每小时 cron，不标红也不刷 TG）。
+   Cloudflare 挑战页 → TRANSIENT。
 
 用法（环境变量）：
     ICEHOST_SERVER_URL                面板地址（必填）
@@ -254,15 +261,29 @@ WAF_MARKERS = ("connection blocked", "blocked on our waf", "zablokowane", "waf -
 CF_MARKERS = ("just a moment", "challenges.cloudflare.com", "cf-turnstile", "cf-chl")
 
 
-def classify_page(page_source: str) -> tuple[Outcome | None, str]:
+def classify_page(page_source: str, *, has_proxy: bool) -> tuple[Outcome | None, str]:
     """页面级拦截识别。命中返回 ``(结论, 说明)``，没命中返回 ``(None, "")``。
 
-    WAF 放行只验 session cookie「存在」不验「有效」，所以「WAF - Block」等价于
-    Cookie 没了 → FAILED 要人换；CF 挑战页只是没过了盾，换次排程可能就过 → TRANSIENT。
+    ⚠️ **只能在注入 Cookie 之后调用。** WAF 只认 ``icehostpl_session``「存在」与否
+    （不验有效性），首次裸访必然吃 "WAF - Block"。在注入前判定等于每次误报：
+    实盘 #241 里代理和 Cookie 都是好的，脚本却在注入前就退了 —— 一次都没点到。
+    （所以 ``has_proxy`` 是必填 kwarg，忘了传会直接 TypeError，不会静默走错分支。）
+
+    WAF 命中后按出口分档（``has_proxy``）：
+      · 走了代理还被拦 → 出口 IP 是干净的，只剩 cookie 废了这一种解释
+        → FAILED，要人换 ICEHOST_COOKIES；
+      · 直连被拦 → runner 机房 IP 本来就在黑名单里，挂上代理就好
+        → TRANSIENT，下个小时再试（本仓每小时 cron，标红就是一天 24 条噪音）。
+
+    CF 挑战页只是没过了盾，换次排程可能就过 → TRANSIENT。
     """
     low = (page_source or "").lower()
     if any(m in low for m in WAF_MARKERS):
-        return Outcome.FAILED, "面板 WAF 拦截出口（Cookie 缺失或失效，请更新 ICEHOST_COOKIES）"
+        if has_proxy:
+            return (Outcome.FAILED,
+                    "面板 WAF 拦截出口（走代理仍被拦，Cookie 已失效，请更新 ICEHOST_COOKIES）")
+        return (Outcome.TRANSIENT,
+                "面板 WAF 拦截直连出口（代理未生效，本次跳过）")
     if any(m in low for m in CF_MARKERS):
         return Outcome.TRANSIENT, "Cloudflare 挑战页未过"
     return None, ""
@@ -531,10 +552,11 @@ def run_browser() -> RunResult:
         sb.uc_open_with_reconnect(SERVER_URL, reconnect_time=8)
         sb.sleep(5)
 
-        # 1) 先看出口有没有被 WAF/CF 拦 —— 被拦时连登录页都到不了，后面全是噪声
-        blocked, why = classify_page(sb.get_page_source())
-        if blocked is not None:
-            return RunResult(blocked, why, shot=_shoot(sb, shot))
+        # ⚠️ 这里**故意不做** WAF/CF 判定。此刻一个 cookie 都还没带，而面板 WAF
+        # 只认 icehostpl_session「存在」与否（不验有效性）——首次裸访必然吃
+        # "WAF - Block"。旧实现（以及本文件的上一版）在这里判了一次，结果实盘
+        # #241 里代理和 Cookie 都正常，脚本却在注入前就退出，一次都没点到。
+        # 判定统一放到注入 Cookie + refresh 之后（第 4 步）。
 
         # 2) 注入 Cookie
         cookies: list[dict] = []
@@ -563,9 +585,18 @@ def run_browser() -> RunResult:
         except Exception as exc:
             print(f"ℹ️ 验证盾跳过或已处理: {exc}", flush=True)
 
-        # 4) 登录状态判定
-        blocked, why = classify_page(sb.get_page_source())
+        # 4) 登录状态判定（**第一次**做 WAF/CF 判定，此时 cookie 已经带上了）
+        blocked, why = classify_page(sb.get_page_source(),
+                                     has_proxy=bool(PROXY_SERVER))
         if blocked is not None:
+            if blocked is Outcome.TRANSIENT and not PROXY_SERVER:
+                # 让「代理没起来」这件事在 Actions 摘要里挂个黄色感叹号。
+                # 否则它只是日志里一行不起眼的字（"no proxy, direct mode"），
+                # 人要翻很久才能把「WAF 拦」和「代理没起来」对上号。
+                print("::warning::本次是直连出口且被 WAF 拦。先查 workflow env 里的 "
+                      "NODE_LINK 还在不在、setup_proxy.sh 有没有真的把 sing-box "
+                      "拉起来 —— 面板 WAF 对 runner 机房 IP 是默认拒绝的。",
+                      flush=True)
             return RunResult(blocked, why, shot=_shoot(sb, shot))
 
         if looks_logged_out(sb.get_current_url(), sb.get_page_source(),

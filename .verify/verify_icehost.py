@@ -529,15 +529,39 @@ def main() -> int:
     c.section("[B5] classify_page：WAF / CF / 正常")
     cp = mod.classify_page
 
-    c.eq("WAF 拦截 → FAILED", cp("blocked on our WAF")[0], mod.Outcome.FAILED)
-    c.eq("WAF - Block → FAILED", cp("WAF - Block")[0], mod.Outcome.FAILED)
-    c.eq("Connection Blocked → FAILED", cp("Connection Blocked")[0], mod.Outcome.FAILED)
-    c.check("WAF 说明提到换 Cookie", "ICEHOST_COOKIES" in cp("blocked on our WAF")[1])
-    c.eq("CF 挑战页 → TRANSIENT", cp("Just a moment...")[0], mod.Outcome.TRANSIENT)
-    c.eq("cf-turnstile → TRANSIENT", cp('<div class="cf-turnstile">')[0], mod.Outcome.TRANSIENT)
-    c.eq("正常页 → None", cp(DASH_OK)[0], None)
-    c.eq("空串 → None", cp("")[0], None)
-    c.eq("WAF 优先于 CF", cp("Just a moment ... blocked on our WAF")[0], mod.Outcome.FAILED)
+    # has_proxy 是**必填** kwarg：忘了传要直接 TypeError，不许静默走错分支。
+    # （上一版这里没有这个参数，于是「代理没起来」和「Cookie 废了」被压成同一个
+    #   FAILED —— 实盘 #241 就是这么每小时刷一条红。）
+    try:
+        cp("blocked on our WAF")
+        c.check("has_proxy 必填（漏传直接报错）", False, "竟然没抛异常")
+    except TypeError:
+        c.check("has_proxy 必填（漏传直接报错）", True)
+
+    c.eq("走代理 + WAF → FAILED", cp("blocked on our WAF", has_proxy=True)[0],
+         mod.Outcome.FAILED)
+    c.eq("WAF - Block → FAILED", cp("WAF - Block", has_proxy=True)[0], mod.Outcome.FAILED)
+    c.eq("Connection Blocked → FAILED", cp("Connection Blocked", has_proxy=True)[0],
+         mod.Outcome.FAILED)
+    c.check("  走代理那档说明提到换 Cookie",
+            "ICEHOST_COOKIES" in cp("blocked on our WAF", has_proxy=True)[1])
+
+    # 实盘 #241：代理没起来 → 直连出口被 WAF 拦。出口脏了不是业务失败，
+    # 标红就是一天 24 条噪音 → TRANSIENT（exit 0、静默、下个小时重试）。
+    c.eq("直连 + WAF → TRANSIENT（不标红）", cp("blocked on our WAF", has_proxy=False)[0],
+         mod.Outcome.TRANSIENT)
+    c.check("  直连那档指向代理、不提 Cookie",
+            "代理" in cp("blocked on our WAF", has_proxy=False)[1]
+            and "ICEHOST_COOKIES" not in cp("blocked on our WAF", has_proxy=False)[1])
+
+    c.eq("CF 挑战页 → TRANSIENT", cp("Just a moment...", has_proxy=True)[0],
+         mod.Outcome.TRANSIENT)
+    c.eq("cf-turnstile → TRANSIENT", cp('<div class="cf-turnstile">', has_proxy=True)[0],
+         mod.Outcome.TRANSIENT)
+    c.eq("正常页 → None", cp(DASH_OK, has_proxy=True)[0], None)
+    c.eq("空串 → None", cp("", has_proxy=True)[0], None)
+    c.eq("WAF 优先于 CF", cp("Just a moment ... blocked on our WAF", has_proxy=True)[0],
+         mod.Outcome.FAILED)
 
     # ─────────────────────────── [B6] 登录态
     c.section("[B6] looks_logged_out")
@@ -669,15 +693,37 @@ def main() -> int:
     c.eq("dry-run → SKIPPED", r.outcome, m_dry.Outcome.SKIPPED)
     c.eq("  dry-run 不点", renew_clicks(sb, m_dry), 0)
 
-    # 6) WAF 拦截 → FAILED，绝不进入续期
+    # 6) ★ 回归实盘 #241：首次裸访吃 WAF - Block，但 Cookie 注入后放行了。
+    #    上一版在**注入 Cookie 之前**就判 WAF，于是代理和 Cookie 都好好的也照样红，
+    #    一次都没点到。判定点必须在注入之后 —— 这里首页给 WAF、注入后给正常页。
     m2 = load_main(**COOKIE_ENV)
     r, sb, _ = scenario(m2, pages=[
         {"source": "Connection Blocked - blocked on our WAF",
          "url": "https://dash.icehost.pl/"},
+        {"source": DASH_OK, "url": "https://dash.icehost.pl/servers"},
+        {"source": DASH_AFTER},
     ])
-    c.eq("WAF 拦截 → FAILED", r.outcome, m2.Outcome.FAILED)
+    c.eq("裸访被拦但注入后放行 → 照常 RENEWED", r.outcome, m2.Outcome.RENEWED)
+    c.eq("  确实注入了 cookie（没在注入前退出）", len(sb.cookies_added), 2)
+    c.eq("  确实点了 1 次续期", renew_clicks(sb, m2), 1)
+
+    # 6b) 注入 Cookie 后**仍然**被拦 + 直连出口 → TRANSIENT（#241 的确切结论）
+    r, sb, _ = scenario(m2, pages=[
+        {"source": "Connection Blocked - blocked on our WAF",
+         "url": "https://dash.icehost.pl/"},
+    ])
+    c.eq("直连 + 注入后仍被拦 → TRANSIENT", r.outcome, m2.Outcome.TRANSIENT)
     c.eq("  没点过", renew_clicks(sb, m2), 0)
-    c.eq("  也没注入 cookie", len(sb.cookies_added), 0)
+    c.check("  说明指向代理没生效", "代理" in r.detail)
+
+    # 6c) 走了代理还被拦 → 出口是干净的，只剩 cookie 废了 → FAILED 要人换
+    m_waf_proxy = load_main(PROXY_SERVER="socks5://127.0.0.1:1080", **COOKIE_ENV)
+    r, sb, _ = scenario(m_waf_proxy, pages=[
+        {"source": "blocked on our WAF", "url": "https://dash.icehost.pl/"},
+    ])
+    c.eq("走代理 + 注入后仍被拦 → FAILED", r.outcome, m_waf_proxy.Outcome.FAILED)
+    c.check("  说明点名换 ICEHOST_COOKIES", "ICEHOST_COOKIES" in r.detail)
+    c.eq("  没点过", renew_clicks(sb, m_waf_proxy), 0)
 
     # 7) CF 挑战页 → TRANSIENT
     r, sb, _ = scenario(m2, pages=[
@@ -800,8 +846,26 @@ def main() -> int:
     c.eq("SKIPPED → 退出码 0", rc, 0)
     c.eq("SKIPPED → 一条 TG 都不发", len(sent), 0)
 
-    # FAILED 时要发
-    m_loud = load_main(**COOKIE_ENV)
+    # ★ 回归实盘 #241：直连出口被 WAF 拦 → 必须 exit 0 且一条 TG 都不发。
+    #    上一版这里是 exit 1 + 一条「请更新 ICEHOST_COOKIES」，而 Cookie 其实是好的。
+    m_trans = load_main(**COOKIE_ENV)
+    fake = FakeSB(pages=[{"source": "blocked on our WAF", "url": "https://dash.icehost.pl/"}])
+    install_fake_seleniumbase(SBFactory(fake))
+    sent_t: list[str] = []
+    sys.modules["renewkit.notify"].send = lambda text, **k: sent_t.append(text) or True
+    try:
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            rc = m_trans.main()
+    finally:
+        sys.modules["renewkit.notify"].send = orig_send
+    c.eq("直连被 WAF 拦 → 退出码 0（实盘 #241 的坑）", rc, 0)
+    c.eq("  一条 TG 都不发（每小时 cron，不能刷屏）", len(sent_t), 0)
+    c.check("  但日志里挂了 ::warning:: 注解指路",
+            "::warning::" in buf.getvalue() and "NODE_LINK" in buf.getvalue())
+
+    # FAILED 时要发。用「走代理仍被 WAF 拦」构造 —— 直连那档已经降级成 TRANSIENT 了。
+    m_loud = load_main(PROXY_SERVER="socks5://127.0.0.1:1080", **COOKIE_ENV)
     fake = FakeSB(pages=[{"source": "blocked on our WAF", "url": "https://dash.icehost.pl/"}])
     install_fake_seleniumbase(SBFactory(fake))
     sent2: list[str] = []
@@ -853,6 +917,23 @@ def main() -> int:
     c.check("到期时间正则不再用 [^0-9]{0,40} 那种被数字卡死的填充",
             "[^0-9]{0,40}" not in code and "不许出现另一个日期" in src)
 
+    # ★ 实盘 #241 的坑：WAF/CF 判定必须在注入 Cookie 之后。
+    #   用 AST 数调用点与行号，比字符串匹配抗重排。
+    _tree = ast.parse(src)
+    cp_calls = [n.lineno for n in ast.walk(_tree)
+                if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                and n.func.id == "classify_page"]
+    addcookie_calls = [n.lineno for n in ast.walk(_tree)
+                       if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                       and n.func.attr == "add_cookie"]
+    c.eq("classify_page 只有一处调用点", len(cp_calls), 1)
+    c.check("add_cookie 确实有调用点", len(addcookie_calls) >= 1)
+    c.check("WAF/CF 判定点在注入 Cookie 之后（实盘 #241 的坑）",
+            bool(cp_calls) and bool(addcookie_calls) and min(cp_calls) > max(addcookie_calls),
+            f"classify_page@{cp_calls} add_cookie@{addcookie_calls}")
+    c.check("直连被 WAF 拦时挂 ::warning:: 注解（把「代理没起来」和「被拦」对上号）",
+            "::warning::" in code)
+
     # ─────────────────────────── [C2] workflow ↔ 代码
     c.section("[C2] workflow 与代码一致")
     wf = WORKFLOW.read_text(encoding="utf-8")
@@ -883,7 +964,13 @@ def main() -> int:
     c.eq("workflow 没漏传矩阵变量", sorted(env_names),
          sorted(["ICEHOST_ACCOUNT_NAME", "ICEHOST_SERVER_URL", "ICEHOST_COOKIES",
                  "ICEHOST_EMAIL", "ICEHOST_PASSWORD", "TG_BOT_TOKEN",
-                 "TG_CHAT_ID", "DRY_RUN"]))
+                 "TG_CHAT_ID", "DRY_RUN", "NODE_LINK"]))
+
+    # ★ 实盘 #241：迁移时把原 workflow 代理 step 上的 NODE_LINK 丢了，
+    #   上游 installer 取到空值 → 静默退直连 → 出口 IP 被面板 WAF 拦。
+    c.check("workflow 传了 NODE_LINK（实盘 #241 漏的就是它）", "NODE_LINK" in env_names)
+    c.check("NODE_LINK 接的是 secrets.NODE_LINK",
+            "NODE_LINK: ${{ secrets.NODE_LINK }}" in wf)
 
     # 脚本读的 ICEHOST_* 凭据变量必须都在 workflow 里传了（防止加了变量忘了接线）
     read_vars = set(re.findall(r'env\.(?:get|get_int|get_list)\("(ICEHOST_[A-Z0-9_]+)"', code))
@@ -902,13 +989,19 @@ def main() -> int:
         rel = f.relative_to(ROOT).as_posix()
         c.check(f"README 目录树里的 {rel} 存在", f.is_file())
     for token in ("ICEHOST_COOKIES", "ICEHOST_SERVER_URL", "TG_BOT_TOKEN", "TG_CHAT_ID",
-                  "0 * * * *", "RENEWED", "SKIPPED", "TRANSIENT", "UNKNOWN", "FAILED",
-                  "renew-kit"):
+                  "NODE_LINK", "0 * * * *", "RENEWED", "SKIPPED", "TRANSIENT", "UNKNOWN",
+                  "FAILED", "renew-kit"):
         c.check(f"README 写了 {token}", token in rd)
     c.check("README 说明了跳过时静默", "静默" in rd)
     c.check("README 说明了按钮不是窗口信号", "照样在页面上" in rd or "不是窗口信号" in rd)
     c.check("README 解释了 WAF 与 session cookie 的关系",
             "WAF" in rd and "Cloudflare" in rd and "不验" in rd)
+    c.check("README 说明了 WAF 判定必须在注入 Cookie 之后",
+            "注入 Cookie 之后" in rd)
+    c.check("README 说明了 WAF 按出口分两档",
+            "走了代理仍被拦" in rd and "直连被拦" in rd)
+    c.check("README 提醒 NODE_LINK 不配就退直连",
+            "NODE_LINK" in rd and "退直连" in rd)
 
     # ─────────────────────────── [C4] 版本 pin 三方一致
     c.section("[C4] renew-kit 版本 pin 一致")
@@ -937,6 +1030,12 @@ def main() -> int:
     c.check("验证失败会退回直连（不中断）", "回退直连" in sh_src)
     c.check("没有 set -e（失败不该中断续期）", "set -e" not in sh_src)
     c.check("有重试", "for i in 1 2 3" in sh_src)
+    # ★ 实盘 #241：NODE_LINK 空值 → 上游 installer 静默退直连。这里必须喊出来。
+    c.check("检查 NODE_LINK 是否传入（实盘 #241 的兜底）",
+            'NODE_LINK' in sh_src and '${NODE_LINK:-}' in sh_src)
+    c.check("NODE_LINK 为空时打 ::warning:: 注解", "::warning::" in sh_src)
+    c.check("NODE_LINK 为空时提示去看 workflow 的 env",
+            "secrets.NODE_LINK" in sh_src)
 
     bash = os.environ.get("RENEWKIT_BASH") or shutil.which("bash")
     if bash is None:

@@ -8,20 +8,34 @@
 #
 # 本脚本是 renew-kit composite action 的 setup-command，默认 continue-on-error，
 # 所以任何一步失败都不会中断续期 —— 大不了退回直连。
+#
+# ⚠️ 但「退回直连」不是无害的：面板前面有 WAF，runner 机房 IP 在它的默认拒绝
+# 名单里。上游 installer 的入口是 `export NODE_LINK=${NODE_LINK:-''}`，取到空值
+# 就静默走「未配置代理，直连模式」。实盘 #241 就是这么红的 —— 迁移时把原
+# workflow 代理 step 上的 `NODE_LINK: ${{ secrets.NODE_LINK }}` 弄丢了。
+# 所以第 0 步先把这件事喊出来，别让它烂在日志里。
 set -uo pipefail
 
 PORT="${ICEHOST_PROXY_PORT:-1080}"
 PROBE_URL="${ICEHOST_PROXY_PROBE_URL:-https://api.ipify.org}"
 INSTALLER="${ICEHOST_PROXY_INSTALLER:-https://main.ssss.nyc.mn/setup_proxy.sh}"
 
-echo "── 1/3 安装代理 ──"
+echo "── 0/4 检查节点配置 ──"
+if [ -z "${NODE_LINK:-}" ]; then
+  echo "::warning::NODE_LINK 未传入 → 上游 installer 会退成直连，出口 IP 极可能被面板 WAF 拦。"
+  echo "⚠️ 请确认 workflow 的 env 里有 NODE_LINK: \${{ secrets.NODE_LINK }}。"
+else
+  echo "✅ NODE_LINK 已传入（${#NODE_LINK} 字符），交给上游 installer 解析"
+fi
+
+echo "── 1/4 安装代理 ──"
 if command -v wget >/dev/null 2>&1; then
   bash <(wget -qO- "$INSTALLER") || echo "⚠️ 安装脚本返回非零（继续验证）"
 else
   bash <(curl -fsSL "$INSTALLER") || echo "⚠️ 安装脚本返回非零（继续验证）"
 fi
 
-echo "── 2/3 验证出口 ──"
+echo "── 2/4 验证出口 ──"
 proxy=""
 if pgrep -f sing-box >/dev/null 2>&1; then
   for i in 1 2 3; do
@@ -39,7 +53,7 @@ else
   echo "no proxy, direct mode"
 fi
 
-echo "── 3/3 导出给后续步骤 ──"
+echo "── 3/4 导出给后续步骤 ──"
 # 走 GITHUB_ENV 而不是 export：export 只活在本 step 的 shell 里，
 # 后面的「Run renewal script」step 是另一个进程，看不到。
 if [ -n "$proxy" ] && [ -n "${GITHUB_ENV:-}" ]; then
