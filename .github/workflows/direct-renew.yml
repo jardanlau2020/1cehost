@@ -50,13 +50,13 @@ jobs:
           curl -s --max-time 15 https://ipinfo.io/json || true
 
       - name: 🔄 执行自动续期（renew-kit）
-        uses: jardanlau2020/renew-kit/.github/actions/renew@v0.4.2
+        uses: jardanlau2020/renew-kit/.github/actions/renew@v0.5.3
         with:
           script: main.py
           python-version: "3.12"
           # 钉版本号而不是 @main：main 上出过一次 composite action 的语法错，
           # 所有 @main 的仓库一起变红。升级是显式动作，改这里两个 v0.4.2 即可。
-          renewkit-ref: v0.4.2
+          renewkit-ref: v0.5.3
           apt-packages: "xvfb x11-utils xdotool scrot fonts-noto-cjk"
           pip-packages: "seleniumbase requests"
           # 代理是「尽力而为」：装不成或探不通都退回直连，所以保持默认的
