@@ -58,7 +58,7 @@ jobs:
           # 所有 @main 的仓库一起变红。升级是显式动作，改这里两个 v0.4.2 即可。
           renewkit-ref: v0.5.3
           apt-packages: "xvfb x11-utils xdotool scrot fonts-noto-cjk"
-          pip-packages: "seleniumbase requests"
+          pip-packages: "seleniumbase==4.57.1 requests"   # 2026-11-15 釘版：4.58.0 令 uc_open_with_reconnect 死 driver（MaxRetryError window/handles）
           # 代理是「尽力而为」：装不成或探不通都退回直连，所以保持默认的
           # continue-on-error=true，绝不因为代理挂了而中断续期。
           setup-command: "bash scripts/setup_proxy.sh"
