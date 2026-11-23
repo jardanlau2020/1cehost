@@ -593,10 +593,12 @@ def main() -> int:
                             limited_after=True, today=FUT), O.SKIPPED),
         ("时间没变（无红框）", dict(before="2026-10-02 12:03", after="2026-10-02 12:03",
                                    today=FUT), O.SKIPPED),
-        ("时间跳了几天", dict(before="2026-10-02 12:03", after="2026-10-05 12:03", today=FUT), O.UNKNOWN),
-        ("读不到 before", dict(before=None, after="2026-10-02 18:03", today=FUT), O.UNKNOWN),
-        ("读不到 after", dict(before="2026-10-02 12:03", after=None, today=FUT), O.UNKNOWN),
-        ("两个都读不到", dict(before=None, after=None, today=FUT), O.UNKNOWN),
+        # 2026-11-23：这三类以前是 UNKNOWN（不红 job = 等于静默），现在一律 FAILED。
+        # 老板要求：日期没变或读不到，一律报 failure 并告警，不许拿「没报错」当成功。
+        ("时间跳了几天", dict(before="2026-10-02 12:03", after="2026-10-05 12:03", today=FUT), O.FAILED),
+        ("读不到 before", dict(before=None, after="2026-10-02 18:03", today=FUT), O.FAILED),
+        ("读不到 after", dict(before="2026-10-02 12:03", after=None, today=FUT), O.FAILED),
+        ("两个都读不到", dict(before=None, after=None, today=FUT), O.FAILED),
         ("+6h 且点击后有红框（矛盾）→ 以数值为准", dict(
             before="2026-10-02 12:03", after="2026-10-02 18:03", limited_after=True, today=FUT), O.RENEWED),
     ]
@@ -703,20 +705,30 @@ def main() -> int:
     c.check("  说明写明是点击后弹的", "点击后" in r.detail)
 
     # 3) 点击前就有限制提示（强特征）→ 不点
+    #    3a) 未到期：正常态，静默跳过
+    r, sb, _ = scenario(m, pages=[
+        {"source": _limited_fut, "url": "https://dash.icehost.pl/servers"},
+    ])
+    c.eq("点击前有强红框（未到期）→ SKIPPED", r.outcome, m.Outcome.SKIPPED)
+    c.eq("  一次都没点", renew_clicks(sb, m), 0)
+
+    #    3b) 已到期还弹点前限制 → 异常，必须 FAILED
+    #        2026-11-23 补：这条以前无条件 SKIPPED，是第二个假成功入口。
     r, sb, _ = scenario(m, pages=[
         {"source": DASH_LIMITED, "url": "https://dash.icehost.pl/servers"},
     ])
-    c.eq("点击前有强红框 → SKIPPED", r.outcome, m.Outcome.SKIPPED)
+    c.eq("点击前有强红框（已到期）→ FAILED", r.outcome, m.Outcome.FAILED)
     c.eq("  一次都没点", renew_clicks(sb, m), 0)
+    c.check("  说明点出「已到期」", "已到期" in r.detail)
 
-    # 4) 到期时间读不到 → 照点，事后 UNKNOWN
+    # 4) 到期时间读不到 → 照点；事后无法确认 → FAILED（不红 job 等于静默）
     plain = "<div><button>ADD 6 HOURS VALIDITY</button></div>"
     r, sb, _ = scenario(m, pages=[
         {"source": plain, "url": "https://dash.icehost.pl/servers"},
         {"source": plain},
         {"source": plain},
     ])
-    c.eq("读不到到期时间 → UNKNOWN", r.outcome, m.Outcome.UNKNOWN)
+    c.eq("读不到到期时间 → FAILED", r.outcome, m.Outcome.FAILED)
     c.eq("  照点 1 次（漏点会被 suspend，不可逆）", renew_clicks(sb, m), 1)
 
     # 5) dry-run → 不点
@@ -865,9 +877,10 @@ def main() -> int:
     c.eq("Cookie 坏了但有密码 → 仍能续期（退出码 0）", rc, 0)
     c.check("  日志说明 Cookie 不可用", "Cookie 不可用" in buf.getvalue())
 
-    # SKIPPED 时不该发 TG
+    # SKIPPED 时不该发 TG（用「未到期 + 限制提示」构造 —— 这才是真正的常态跳过；
+    # 已到期还弹限制现在判 FAILED，会告警，不能拿它验证静默）
     m_quiet = load_main(**COOKIE_ENV)
-    fake = FakeSB(pages=[{"source": DASH_LIMITED, "url": "https://dash.icehost.pl/servers"}])
+    fake = FakeSB(pages=[{"source": _limited_fut, "url": "https://dash.icehost.pl/servers"}])
     install_fake_seleniumbase(SBFactory(fake))
     sent: list[str] = []
     orig_send = sys.modules["renewkit.notify"].send
