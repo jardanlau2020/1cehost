@@ -31,10 +31,10 @@ xvfb 虚拟桌面）发系统级点击过盾，而不是裸 HTTP 请求。
 > 所以 `classify_page()` 的 `has_proxy` 是**必填 kwarg**：忘了传直接 `TypeError`，
 > 不会静默走错分支。
 
-> **renew-kit 钉在 tag 上**：`jardanlau2020/renew-kit/.github/actions/renew@v0.4.2`，
-> 同时 `renewkit-ref: v0.4.2`。不跟 `@main` 是有教训的 —— main 上出过一次
+> **renew-kit 钉在 tag 上**：`jardanlau2020/renew-kit/.github/actions/renew@v0.5.3`，
+> 同时 `renewkit-ref: v0.5.3`。不跟 `@main` 是有教训的 —— main 上出过一次
 > composite action 的语法错（空 `then` 分支），所有跟 `@main` 的仓库一起变红。
-> 升级就改这两个 `v0.4.2`。
+> 升级就改这两个 `v0.5.3`。
 
 ## 为什么「未到窗口」要靠点击后的红框判断
 
