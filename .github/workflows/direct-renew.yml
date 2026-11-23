@@ -1,38 +1,38 @@
-name: Auto Renew
+﻿name: Auto Renew
 
-# 1cehost 续期主流程。业务逻辑在 main.py；Python/依赖/通知/退出码这些通用部分
-# 走 renew-kit 的 composite action，不再手写。
+# 1cehost 缁湡涓绘祦绋嬨€備笟鍔￠€昏緫鍦?main.py锛汸ython/渚濊禆/閫氱煡/閫€鍑虹爜杩欎簺閫氱敤閮ㄥ垎
+# 璧?renew-kit 鐨?composite action锛屼笉鍐嶆墜鍐欍€?
 #
-# ── 排程：cron 只是兜底，真正的保障靠外部触发 ──────────────────────────
-# 面板的续期窗口是 6 小时，而且必须「过期之后」才能续（见 README 的实测），
-# 所以触发频率必须高于 6 小时，否则一次 miss 就可能 suspended
-# （2026-09-16 病史：miss 2 次 → 服务器 suspended）。
+# 鈹€鈹€ 鎺掔▼锛歝ron 鍙槸鍏滃簳锛岀湡姝ｇ殑淇濋殰闈犲閮ㄨЕ鍙?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+# 闈㈡澘鐨勭画鏈熺獥鍙ｆ槸 6 灏忔椂锛岃€屼笖蹇呴』銆岃繃鏈熶箣鍚庛€嶆墠鑳界画锛堣 README 鐨勫疄娴嬶級锛?
+# 鎵€浠ヨЕ鍙戦鐜囧繀椤婚珮浜?6 灏忔椂锛屽惁鍒欎竴娆?miss 灏卞彲鑳?suspended
+# 锛?026-09-16 鐥呭彶锛歮iss 2 娆?鈫?鏈嶅姟鍣?suspended锛夈€?
 #
-# 2026-11-23 实测：GitHub 对高频 schedule 有丢弃，不能按 cron 表达式算频率。
-# 本仓 2026-10-14~11-23 共 400 个 run：cron 声明 24 次/天，schedule 实际只落到
-# 每天 3~5 次，间隔 4.2~9.4h（均值约 7h）—— 达成率 15~20%。
-# 对照组（公开实测）：声明 4 次/小时实得 1~2 次，改成 2 次/小时实得仍是 1~2 次，
-# 说明 cron 表达式只是「上限」，不是「合同」，加时间点不会变多。
+# 2026-11-23 瀹炴祴锛欸itHub 瀵归珮棰?schedule 鏈変涪寮冿紝涓嶈兘鎸?cron 琛ㄨ揪寮忕畻棰戠巼銆?
+# 鏈粨 2026-10-14~11-23 鍏?400 涓?run锛歝ron 澹版槑 24 娆?澶╋紝schedule 瀹為檯鍙惤鍒?
+# 姣忓ぉ 3~5 娆★紝闂撮殧 4.2~9.4h锛堝潎鍊肩害 7h锛夆€斺€?杈炬垚鐜?15~20%銆?
+# 瀵圭収缁勶紙鍏紑瀹炴祴锛夛細澹版槑 4 娆?灏忔椂瀹炲緱 1~2 娆★紝鏀规垚 2 娆?灏忔椂瀹炲緱浠嶆槸 1~2 娆★紝
+# 璇存槑 cron 琛ㄨ揪寮忓彧鏄€屼笂闄愩€嶏紝涓嶆槸銆屽悎鍚屻€嶏紝鍔犳椂闂寸偣涓嶄細鍙樺銆?
 #
-# ⇒ 真正的触发源是大阪 VPS 的 crontab（每小时 :07 dispatch 一次），见文件末尾。
-#   2026-11-23 由 CEO 批准从 `*/30` 降为每小时：面板 6 小时冷却，30 分钟一轮里 47/48
-#   是空跑，而空跑也会真点一次续期按钮（WAF 特征），每小时仍在窗口内留 6 次机会。
-#   时区提醒：那台 VPS 是 US/Eastern，cron 按 EST 计时，脚本日志用 UTC，差 5 小时；
-#   但 EST :07 = UTC :07 = 北京 :07，分钟数下不受影响。
-#   cron 保留 `17 * * * *` 只作兜底；取 :17 而不是 :00，因为整点是全球 cron 扎堆的
-#   高峰，GitHub 官方明确说高负载时段包含「每小时开始」，实测挪到奇数分钟能显著
-#   降低延迟。
+# 鈬?鐪熸鐨勮Е鍙戞簮鏄ぇ闃?VPS 鐨?crontab锛堟瘡灏忔椂 :07 dispatch 涓€娆★級锛岃鏂囦欢鏈熬銆?
+#   2026-11-23 鐢?CEO 鎵瑰噯浠?`*/30` 闄嶄负姣忓皬鏃讹細闈㈡澘 6 灏忔椂鍐峰嵈锛?0 鍒嗛挓涓€杞噷 47/48
+#   鏄┖璺戯紝鑰岀┖璺戜篃浼氱湡鐐逛竴娆＄画鏈熸寜閽紙WAF 鐗瑰緛锛夛紝姣忓皬鏃朵粛鍦ㄧ獥鍙ｅ唴鐣?6 娆℃満浼氥€?
+#   鏃跺尯鎻愰啋锛氶偅鍙?VPS 鏄?US/Eastern锛宑ron 鎸?EST 璁℃椂锛岃剼鏈棩蹇楃敤 UTC锛屽樊 5 灏忔椂锛?
+#   浣?EST :07 = UTC :07 = 鍖椾含 :07锛屽垎閽熸暟涓嬩笉鍙楀奖鍝嶃€?
+#   cron 淇濈暀 `17 * * * *` 鍙綔鍏滃簳锛涘彇 :17 鑰屼笉鏄?:00锛屽洜涓烘暣鐐规槸鍏ㄧ悆 cron 鎵庡爢鐨?
+#   楂樺嘲锛孏itHub 瀹樻柟鏄庣‘璇撮珮璐熻浇鏃舵鍖呭惈銆屾瘡灏忔椂寮€濮嬨€嶏紝瀹炴祴鎸埌濂囨暟鍒嗛挓鑳芥樉钁?
+#   闄嶄綆寤惰繜銆?
 #
-# 窗口没开时脚本静默 exit 0，也不发 TG（见 main.py 的 should_notify）。
+# 绐楀彛娌″紑鏃惰剼鏈潤榛?exit 0锛屼篃涓嶅彂 TG锛堣 main.py 鐨?should_notify锛夈€?
 
 on:
   workflow_dispatch:
     inputs:
       reason:
-        description: 僅供手動觸發(留空即可)
+        description: 鍍呬緵鎵嬪嫊瑙哥櫦(鐣欑┖鍗冲彲)
         required: false
       dry_run:
-        description: Dry run（只检查、不点击续期）
+        description: Dry run锛堝彧妫€鏌ャ€佷笉鐐瑰嚮缁湡锛?
         type: boolean
         default: false
   schedule:
@@ -46,8 +46,8 @@ jobs:
     name: Renew ${{ matrix.account }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    # 同一账号的两次运行不重叠：浏览器启动 + 过盾要几分钟，撞在一起容易被面板
-    # 当成异常流量。cancel-in-progress=false 让后来的排队而不是掐掉前一个。
+    # 鍚屼竴璐﹀彿鐨勪袱娆¤繍琛屼笉閲嶅彔锛氭祻瑙堝櫒鍚姩 + 杩囩浘瑕佸嚑鍒嗛挓锛屾挒鍦ㄤ竴璧峰鏄撹闈㈡澘
+    # 褰撴垚寮傚父娴侀噺銆俢ancel-in-progress=false 璁╁悗鏉ョ殑鎺掗槦鑰屼笉鏄帎鎺夊墠涓€涓€?
     concurrency:
       group: direct-renew-${{ matrix.account }}
       cancel-in-progress: false
@@ -59,28 +59,28 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # 出口 IP 只做记录。面板前面有 WAF，真出问题时第一件事就是看出口换没换。
-      - name: 📍 确认出口 IP
+      # 鍑哄彛 IP 鍙仛璁板綍銆傞潰鏉垮墠闈㈡湁 WAF锛岀湡鍑洪棶棰樻椂绗竴浠朵簨灏辨槸鐪嬪嚭鍙ｆ崲娌℃崲銆?
+      - name: 馃搷 纭鍑哄彛 IP
         continue-on-error: true
         run: |
-          echo "Runner 出口 IP: $(curl -s --max-time 15 https://api.ipify.org || echo n/a)"
+          echo "Runner 鍑哄彛 IP: $(curl -s --max-time 15 https://api.ipify.org || echo n/a)"
           curl -s --max-time 15 https://ipinfo.io/json || true
 
-      - name: 🔄 执行自动续期（renew-kit）
-        uses: jardanlau2020/renew-kit/.github/actions/renew@v0.5.3
+      - name: 馃攧 鎵ц鑷姩缁湡锛坮enew-kit锛?
+        uses: jardanlau2020/renew-kit/.github/actions/renew@v0.6.0
         with:
           script: main.py
           python-version: "3.12"
-          # 钉版本号而不是 @main：main 上出过一次 composite action 的语法错，
-          # 所有 @main 的仓库一起变红。升级是显式动作，改这里两个 v0.4.2 即可。
-          renewkit-ref: v0.5.3
+          # 閽夌増鏈彿鑰屼笉鏄?@main锛歮ain 涓婂嚭杩囦竴娆?composite action 鐨勮娉曢敊锛?
+          # 鎵€鏈?@main 鐨勪粨搴撲竴璧峰彉绾€傚崌绾ф槸鏄惧紡鍔ㄤ綔锛屾敼杩欓噷涓や釜 v0.4.2 鍗冲彲銆?
+          renewkit-ref: v0.6.0
           apt-packages: "xvfb x11-utils xdotool scrot fonts-noto-cjk"
-          pip-packages: "seleniumbase==4.57.1 requests"   # 2026-11-15 釘版：4.58.0 令 uc_open_with_reconnect 死 driver（MaxRetryError window/handles）
-          # 代理是「尽力而为」：装不成或探不通都退回直连，所以保持默认的
-          # continue-on-error=true，绝不因为代理挂了而中断续期。
+          pip-packages: "seleniumbase==4.57.1 requests"   # 2026-11-15 閲樼増锛?.58.0 浠?uc_open_with_reconnect 姝?driver锛圡axRetryError window/handles锛?
+          # 浠ｇ悊鏄€屽敖鍔涜€屼负銆嶏細瑁呬笉鎴愭垨鎺笉閫氶兘閫€鍥炵洿杩烇紝鎵€浠ヤ繚鎸侀粯璁ょ殑
+          # continue-on-error=true锛岀粷涓嶅洜涓轰唬鐞嗘寕浜嗚€屼腑鏂画鏈熴€?
           setup-command: "bash scripts/setup_proxy.sh"
-          # SeleniumBase 的 UC 模式要真实 X 显示才能发系统级点击（过 CF 盾），
-          # 所以主命令得套 xvfb-run，不能用默认的 python main.py。
+          # SeleniumBase 鐨?UC 妯″紡瑕佺湡瀹?X 鏄剧ず鎵嶈兘鍙戠郴缁熺骇鐐瑰嚮锛堣繃 CF 鐩撅級锛?
+          # 鎵€浠ヤ富鍛戒护寰楀 xvfb-run锛屼笉鑳界敤榛樿鐨?python main.py銆?
           command: 'xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python3 main.py'
           artifact-paths: "*.png"
           artifact-name: icehost-screenshots-${{ matrix.account }}
@@ -93,34 +93,35 @@ jobs:
           ICEHOST_PASSWORD: ${{ matrix.account == '01' && secrets.ICEHOST_PASSWORD || secrets.ICEHOST_PASSWORD_02 }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-          # 2026-11-23：原先这里传 ICEHOST_NEAR_EXPIRY_S="7200"（剩 ≤2h 算临近到期）。
-          # 后来查明站方机制是「**必须过期之后才能续**」——剩 1h 被拒也是预期，不是异常，
-          # 那个 2h 阈值会把常态误判成 FAILED。判据已改成按「到期日是否已到（当天或更早）」，
-          # 常量 NEAR_EXPIRY_S 已删除，所以这个 env 一并去掉，别再加回来。
-          # 详见 README「站点机制：必须过期之后才能续」与 main.py 的 _expired_on()。
-          # ⚠️ NODE_LINK 必须传给 setup_proxy.sh，否则上游 installer 的
-          # `export NODE_LINK=${NODE_LINK:-''}` 取到空值，直接走「未配置代理，
-          # 直连模式」，一声不响地退回 runner 机房 IP —— 那个 IP 在面板 WAF 的
-          # 默认拒绝名单里。实盘 #241 就是漏了这一行红的（迁移时从原 workflow
-          # 的代理 step 里丢了）。setup_proxy.sh 里也加了空值告警兜底。
+          # 2026-11-23锛氬師鍏堣繖閲屼紶 ICEHOST_NEAR_EXPIRY_S="7200"锛堝墿 鈮?h 绠椾复杩戝埌鏈燂級銆?
+          # 鍚庢潵鏌ユ槑绔欐柟鏈哄埗鏄€?*蹇呴』杩囨湡涔嬪悗鎵嶈兘缁?*銆嶁€斺€斿墿 1h 琚嫆涔熸槸棰勬湡锛屼笉鏄紓甯革紝
+          # 閭ｄ釜 2h 闃堝€间細鎶婂父鎬佽鍒ゆ垚 FAILED銆傚垽鎹凡鏀规垚鎸夈€屽埌鏈熸棩鏄惁宸插埌锛堝綋澶╂垨鏇存棭锛夈€嶏紝
+          # 甯搁噺 NEAR_EXPIRY_S 宸插垹闄わ紝鎵€浠ヨ繖涓?env 涓€骞跺幓鎺夛紝鍒啀鍔犲洖鏉ャ€?
+          # 璇﹁ README銆岀珯鐐规満鍒讹細蹇呴』杩囨湡涔嬪悗鎵嶈兘缁€嶄笌 main.py 鐨?_expired_on()銆?
+          # 鈿狅笍 NODE_LINK 蹇呴』浼犵粰 setup_proxy.sh锛屽惁鍒欎笂娓?installer 鐨?
+          # `export NODE_LINK=${NODE_LINK:-''}` 鍙栧埌绌哄€硷紝鐩存帴璧般€屾湭閰嶇疆浠ｇ悊锛?
+          # 鐩磋繛妯″紡銆嶏紝涓€澹颁笉鍝嶅湴閫€鍥?runner 鏈烘埧 IP 鈥斺€?閭ｄ釜 IP 鍦ㄩ潰鏉?WAF 鐨?
+          # 榛樿鎷掔粷鍚嶅崟閲屻€傚疄鐩?#241 灏辨槸婕忎簡杩欎竴琛岀孩鐨勶紙杩佺Щ鏃朵粠鍘?workflow
+          # 鐨勪唬鐞?step 閲屼涪浜嗭級銆俿etup_proxy.sh 閲屼篃鍔犱簡绌哄€煎憡璀﹀厹搴曘€?
           NODE_LINK: ${{ secrets.NODE_LINK }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
 
-# ══════════════════════════════════════════════════════════════════════════
-# 外部触发源 —— 别再查「谁在 dispatch」了，就是这里
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+# 澶栭儴瑙﹀彂婧?鈥斺€?鍒啀鏌ャ€岃皝鍦?dispatch銆嶄簡锛屽氨鏄繖閲?
 #
-#   主机     159.13.38.22（大阪 VPS，Debian 10，root）
-#   脚本     /root/.config/scripts/1cehost-dispatch.sh      chmod 700 root:root
+#   涓绘満     159.13.38.22锛堝ぇ闃?VPS锛孌ebian 10锛宺oot锛?
+#   鑴氭湰     /root/.config/scripts/1cehost-dispatch.sh      chmod 700 root:root
 #   crontab  */30 * * * * /root/.config/scripts/1cehost-dispatch.sh
-#   凭据     /root/.config/1cehost-token                    chmod 600 root:root
-#            脚本内 `TOKEN=$(cat ...)` 引用；不进命令行、不打印、不进日志
-#   日志     /var/log/1cehost-dispatch.log                  chmod 600
-#            每行 = UTC 时间 + HTTP 状态码（204 = dispatch 成功）
+#   鍑嵁     /root/.config/1cehost-token                    chmod 600 root:root
+#            鑴氭湰鍐?`TOKEN=$(cat ...)` 寮曠敤锛涗笉杩涘懡浠よ銆佷笉鎵撳嵃銆佷笉杩涙棩蹇?
+#   鏃ュ織     /var/log/1cehost-dispatch.log                  chmod 600
+#            姣忚 = UTC 鏃堕棿 + HTTP 鐘舵€佺爜锛?04 = dispatch 鎴愬姛锛?
 #
-# 由来：2026-11-23 查「为什么每小时的 cron 每天只跑 3~5 次」时，发现一半 run 是
-# workflow_dispatch 却没人认领，查了好几轮才定位到这个外部脚本。所以把出处写死在
-# 这里，避免下次再变成悬案。
+# 鐢辨潵锛?026-11-23 鏌ャ€屼负浠€涔堟瘡灏忔椂鐨?cron 姣忓ぉ鍙窇 3~5 娆°€嶆椂锛屽彂鐜颁竴鍗?run 鏄?
+# workflow_dispatch 鍗存病浜鸿棰嗭紝鏌ヤ簡濂藉嚑杞墠瀹氫綅鍒拌繖涓閮ㄨ剼鏈€傛墍浠ユ妸鍑哄鍐欐鍦?
+# 杩欓噷锛岄伩鍏嶄笅娆″啀鍙樻垚鎮銆?
 #
-# 想停掉它：`crontab -e` 删掉那行，或 `chmod -x /root/.config/scripts/1cehost-dispatch.sh`。
-# 相关的节流实测数据见本文件开头的排程说明。
-# ══════════════════════════════════════════════════════════════════════════
+# 鎯冲仠鎺夊畠锛歚crontab -e` 鍒犳帀閭ｈ锛屾垨 `chmod -x /root/.config/scripts/1cehost-dispatch.sh`銆?
+# 鐩稿叧鐨勮妭娴佸疄娴嬫暟鎹鏈枃浠跺紑澶寸殑鎺掔▼璇存槑銆?
+# 鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲鈺愨晲
+
