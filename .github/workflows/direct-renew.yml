@@ -76,6 +76,10 @@ jobs:
           ICEHOST_PASSWORD: ${{ matrix.account == '01' && secrets.ICEHOST_PASSWORD || secrets.ICEHOST_PASSWORD_02 }}
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          # 2026-11-23：修「假成功」时新增。剩余 ≤ 该秒数（或已过期）时，
+          # 「点了但日期没变 / 读不到日期」一律判 FAILED 并告警；离到期还远则静默跳过。
+          # 面板一次 +6h、有效期 24h，2 小时足够留出 3 轮 cron 的补救余地。
+          ICEHOST_NEAR_EXPIRY_S: "7200"
           # ⚠️ NODE_LINK 必须传给 setup_proxy.sh，否则上游 installer 的
           # `export NODE_LINK=${NODE_LINK:-''}` 取到空值，直接走「未配置代理，
           # 直连模式」，一声不响地退回 runner 机房 IP —— 那个 IP 在面板 WAF 的
