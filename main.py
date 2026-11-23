@@ -60,7 +60,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from renewkit import Outcome, RenewReport
@@ -87,6 +87,20 @@ EXTEND_MAX_S = env.get_int("ICEHOST_EXTEND_MAX_S", 9 * 3600)
 #: 点击后等红框渲染的时间，以及刷新后等 SPA 重新拉数据的时间
 CLICK_WAIT_S = env.get_int("ICEHOST_CLICK_WAIT_S", 5)
 REFRESH_WAIT_S = env.get_int("ICEHOST_REFRESH_WAIT_S", 5)
+
+#: 距到期还有多少小时以内才值得点按钮。
+#: 面板一次只 +6h、冷却 6h ⇒ 距到期还远的那几轮点了也只会弹限制提示，
+#: 等于白启一次浏览器。2026-11-23 实测（run 45165752217）：
+#: 11:33:35 读到到期 11-24 00:03 → 11:33:35 就点了 → 11:33:46 时间没变 +
+#: 红框「不能续期，下一次在 6 小时后」，整轮白耗 116 秒，一天 24 次。
+RENEW_WINDOW_H = env.get_int("ICEHOST_RENEW_WINDOW_H", 2)
+
+#: 面板显示的到期时间是哪个时区（小时偏移，默认 +8 = 北京时间），不是波兰 CET。
+#: 依据：11-23 19:05 那次续期成功时，面板到期时间记 11-23 18:03。
+#: 按 CET(+1) 算当时还没到期、本该被拒；按 UTC+8 算已过期 1 小时，与「成功」吻合。
+#: 做成变量而不是硬编码：算错方向会「永远不点」→ 到期被 suspend（不可逆），
+#: 所以换面板/换机器时先拿实测日志核一遍这个偏移。
+PANEL_TZ_OFFSET_H = env.get_int("ICEHOST_PANEL_TZ_OFFSET_H", 8)
 
 SHOT_DIR = env.get("ICEHOST_SHOT_DIR", ".") or "."
 SHOT_NAME = "run_screenshot.png"
@@ -201,6 +215,23 @@ def parse_expiry_dt(value: str | None) -> datetime | None:
         except ValueError:
             continue
     return None
+
+
+def _hours_until(before: str | None, now: datetime | None = None,
+                 *, tz_offset_h: int = PANEL_TZ_OFFSET_H) -> float | None:
+    """距到期还有多少小时（负数=已过期）；读不到到期时间返回 ``None``。
+
+    面板上的到期时间是**面板本地时区**（实测 UTC+8，见 ``PANEL_TZ_OFFSET_H``），
+    而 runner 时钟是 UTC，所以要把「现在」先换算到面板时区再相减。
+    读不到就返回 ``None`` —— 调用方必须把「读不到」当「照点」处理，
+    不能当成「还早」，否则会永远不点（后果是到期 suspend，不可逆）。
+    """
+    b = parse_expiry_dt(before)
+    if b is None:
+        return None
+    if now is None:
+        now = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=tz_offset_h)
+    return (b - now).total_seconds() / 3600
 
 
 def fmt_exp(value: str | None) -> str:
@@ -707,6 +738,17 @@ def run_browser() -> RunResult:
         if DRY_RUN:
             return RunResult(Outcome.SKIPPED, "dry-run：未真正点击续期", expire=before,
                              shot=_shoot(sb, shot))
+
+        # 5.5) 距到期还远就本轮不点。
+        # 面板一次只 +6h、冷却 6h，太早点只会弹限制提示，白耗一次浏览器（实测 116 秒）。
+        # 读不到到期时间（remain is None）时**照点** —— 同文件头第 2 条。
+        remain = _hours_until(before)
+        if remain is not None and remain > RENEW_WINDOW_H:
+            print(f"⏱️ 距到期还有 {remain:.1f} 小时（> {RENEW_WINDOW_H}h），本轮不点按钮",
+                  flush=True)
+            return RunResult(Outcome.SKIPPED,
+                             f"距到期还有 {remain:.1f} 小时（> {RENEW_WINDOW_H}h），本轮不点按钮",
+                             expire=before)
 
         # 6) 点续期按钮
         try:
