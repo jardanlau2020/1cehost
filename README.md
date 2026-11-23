@@ -13,7 +13,7 @@ xvfb 虚拟桌面）发系统级点击过盾，而不是裸 HTTP 请求。
 | 触发源 | 频率 | 角色 |
 |---|---|---|
 | GitHub cron `17 * * * *` | 声明每小时，**实得每天 3~5 次** | 兜底 |
-| **大阪 VPS 159.13.38.22 的 crontab** | 每 30 分钟，实际打得到 | **主路径** |
+| **大阪 VPS 159.13.38.22 的 crontab** | 每小时 1 次（VPS 本地 `:07`），实际打得到 | **主路径** |
 
 为什么不能靠 cron：本仓 2026-10-14~11-23 共 400 个 run，cron 声明 24 次/天，
 `schedule` 事件实际只落到 3~5 次/天，间隔 4.2~9.4h（均值约 7h），达成率 15~20%。
@@ -24,13 +24,21 @@ xvfb 虚拟桌面）发系统级点击过盾，而不是裸 HTTP 请求。
 
 ```
 主机     159.13.38.22（大阪 VPS，Debian 10，root）
+时区     US/Eastern (EST, -0500)
+         cron 按 EST 计时，脚本日志按 UTC 记，两者差 5 小时，对账时别混
 脚本     /root/.config/scripts/1cehost-dispatch.sh           700 root:root
-crontab  */30 * * * * /root/.config/scripts/1cehost-dispatch.sh
+crontab  7 * * * * /root/.config/scripts/1cehost-dispatch.sh
+         每小时 :07 触发。EST :07 = UTC :07 = 北京 :07（整点对齐，分钟数不受时区影响）
 凭据     /root/.config/1cehost-token                         600 root:root
          脚本内 cat 引用，不进命令行、不打印、不进日志
 日志     /var/log/1cehost-dispatch.log                       600
          每行 = UTC 时间 + HTTP 状态码（204 = dispatch 成功）
 ```
+
+**2026-11-23 由 CEO 批准从 `*/30` 降为每小时**：面板是 6 小时冷却，30 分钟一轮等于
+一天 48 轮里 47 轮必然空跑；而每轮空跑都会**真点一次续期按钮**再被面板弹限制提示，
+频繁点击同一个按钮是 WAF 最典型的识别特征（这个账号的 cookie 自 2026-09-07 起没换过）。
+改成每小时，无效点击减半，6 小时窗口内仍有 6 次机会。
 
 停用：`crontab -e` 删掉那行，或 `chmod -x` 那个脚本。
 
