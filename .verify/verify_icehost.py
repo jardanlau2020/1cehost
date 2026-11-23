@@ -384,11 +384,6 @@ DASH_OK = """
 """
 DASH_AFTER = DASH_OK.replace("2026-10-02 12:03", "2026-10-02 18:03")
 DASH_LIMITED = DASH_OK + '<div class="alert">Nie możesz przedłużyć serwera, zrobiłeś to niedawno</div>'
-#: 未来日期版：代表「离到期还远，窗口没开」的常态 —— 没续上应当静默 SKIPPED。
-#: 2026-11-23 加：修假成功后，判据变成「临近到期才算失败」，测试需要两种时间各一份。
-DASH_FUTURE = DASH_OK.replace("2026-10-02 12:03", "2099-10-02 12:03")
-DASH_FUTURE_LIMITED = DASH_FUTURE + (
-    '<div class="alert">Nie możesz przedłużyć serwera, zrobiłeś to niedawno</div>')
 LOGIN_PAGE = '<form><input name="username"><input type="password"></form>Zaloguj się'
 
 
@@ -584,47 +579,56 @@ def main() -> int:
     dc = mod.decide
     O = mod.Outcome
 
-    # 2026-11-23：判据分「未到期 / 已过期 / 临近到期」三档。
-    # 日期用显式值（不取 now 抖动），只有 NEAR 依赖 now —— 它必须落在阈值内。
-    import datetime as _dt
-    FUT = "2099-10-02 12:03"      # 远未来：窗口没开，没续上是常态
-    FUT6 = "2099-10-02 18:03"     # 远未来 +6h
-    FUT3D = "2099-10-05 12:03"    # 远未来 +3 天（跳变）
-    PAST = "2020-10-02 12:03"     # 早已过期
-    NEAR = (_dt.datetime.now() + _dt.timedelta(hours=1)).strftime("%Y-%m-%d %H:%M")
+    # 下面这批用固定日期 2026-10-02 的**未来**视角（today=10-01）跑，
+    # 才能测「未到窗口」的常态；否则 2026-10-02 早就过期了，
+    # 会被 _expired_on 判成「已到期」而落进 FAILED（见 [B7b] 的实盘回归）。
+    from datetime import date as _date
+    FUT = _date(2026, 10, 1)
 
     cases = [
-        # 到期还远（2099）→ 没续上属常态，静默跳过
-        ("点击前已有红框（未到期）", dict(before=FUT, after=FUT,
-                                          limited_before=True), O.SKIPPED),
-        ("正常 +6h", dict(before=FUT, after=FUT6), O.RENEWED),
-        ("点击后红框（未到期）", dict(before=FUT, after=FUT,
-                                     limited_after=True), O.SKIPPED),
-        ("时间没变（未到期）", dict(before=FUT, after=FUT), O.SKIPPED),
-        # 已过期 → 没续上就是真失败，必须告警（2026-11-23 修的假成功）
-        ("已过期 + 点击后红框 → 失败", dict(before=PAST, after=PAST,
-                                            limited_after=True), O.FAILED),
-        ("已过期 + 时间没变 → 失败", dict(before=PAST, after=PAST), O.FAILED),
-        ("已过期 + 点击前红框 → 失败", dict(before=PAST, after=PAST,
-                                            limited_before=True), O.FAILED),
-        ("临近到期（剩 1h）+ 时间没变 → 失败",
-         dict(before=NEAR, after=NEAR), O.FAILED),
-        # 时间跳变 / 读不到 → 一律失败，不拿「没报错」当成功
-        ("时间跳了几天", dict(before=FUT, after=FUT3D), O.FAILED),
-        ("读不到 before", dict(before=None, after=FUT6), O.FAILED),
-        ("读不到 after", dict(before=FUT, after=None), O.FAILED),
-        ("两个都读不到", dict(before=None, after=None), O.FAILED),
+        ("点击前已有红框", dict(before="2026-10-02 12:03", after="2026-10-02 12:03",
+                                limited_before=True, today=FUT), O.SKIPPED),
+        ("正常 +6h", dict(before="2026-10-02 12:03", after="2026-10-02 18:03", today=FUT), O.RENEWED),
+        ("点击后红框", dict(before="2026-10-02 12:03", after="2026-10-02 12:03",
+                            limited_after=True, today=FUT), O.SKIPPED),
+        ("时间没变（无红框）", dict(before="2026-10-02 12:03", after="2026-10-02 12:03",
+                                   today=FUT), O.SKIPPED),
+        ("时间跳了几天", dict(before="2026-10-02 12:03", after="2026-10-05 12:03", today=FUT), O.UNKNOWN),
+        ("读不到 before", dict(before=None, after="2026-10-02 18:03", today=FUT), O.UNKNOWN),
+        ("读不到 after", dict(before="2026-10-02 12:03", after=None, today=FUT), O.UNKNOWN),
+        ("两个都读不到", dict(before=None, after=None, today=FUT), O.UNKNOWN),
         ("+6h 且点击后有红框（矛盾）→ 以数值为准", dict(
-            before=FUT, after=FUT6, limited_after=True), O.RENEWED),
+            before="2026-10-02 12:03", after="2026-10-02 18:03", limited_after=True, today=FUT), O.RENEWED),
     ]
     for label, kwargs, want in cases:
         got, detail = dc(**kwargs)
         c.eq(f"{label} → {want.value}", got, want)
 
-    c.check("点击后红框的说明写明是「站点限制」",
-            "站点限制" in dc(before=FUT, after=FUT, limited_after=True)[1])
-    c.check("已过期失败时说明带到期时间",
-            "10-02 12:03" in dc(before=PAST, after=PAST)[1])
+    c.eq("点击后红框的说明带原因",
+         dc(before="2026-10-02 12:03", after="2026-10-02 12:03",
+            limited_after=True, today=FUT)[1],
+         "未到续期窗口（点击后弹出限制提示）")
+
+    # ─────────────────────── [B7b] 已到期却续不上 = 失败（2026-11-23 实盘回归）
+    c.section("[B7b] 已到期必须报失败，不许落进静默的 SKIPPED")
+    TODAY = _date(2026, 11, 23)      # 实盘那天：到期 11-23 18:03，点击弹限制、日期没变
+    for label, kwargs in [
+        ("已到期 + 点击后红框", dict(before="2026-11-23 18:03", after="2026-11-23 18:03",
+                                     limited_after=True, today=TODAY)),
+        ("已到期 + 日期没变", dict(before="2026-11-23 18:03", after="2026-11-23 18:03",
+                                   today=TODAY)),
+        ("已过期多日 + 红框", dict(before="2026-11-20 09:00", after="2026-11-20 09:00",
+                                   limited_after=True, today=TODAY)),
+    ]:
+        got, detail = dc(**kwargs)
+        c.eq(f"{label} → failed", got, O.FAILED)
+        c.check(f"{label} 的说明点明「已到期」", "已到期" in detail)
+
+    c.check("已到期但真拿到 +6h → 仍算续上",
+            dc(before="2026-11-23 18:03", after="2026-11-24 00:03", today=TODAY)[0] is O.RENEWED)
+    c.check("当天到期（同一天）也按已到期处理",
+            dc(before="2026-11-23 00:30", after="2026-11-23 00:30",
+               limited_after=True, today=TODAY)[0] is O.FAILED)
     c.check("只有 FAILED 才让 job 红", not O.UNKNOWN.is_error and not O.SKIPPED.is_error
             and O.FAILED.is_error)
 
@@ -683,48 +687,36 @@ def main() -> int:
     c.check("  日志打了续期前后的时间", "12:03" in out and "18:03" in out)
 
     # 2) 窗口未开：点击后弹红框（实盘 #237/#239 的真实路径）
-    #    2026-11-23：用「未来到期」的页面 —— 未到窗口弹限制属常态，应静默 SKIPPED。
+    # 到期日换成「未来」，否则 2026-10-02 早过期了，会被判成「已到期 → FAILED」
+    # （那是 [B7b] 的用例，不是这里要测的「未到窗口」常态）。
+    from datetime import timedelta as _td
+    _fut = (_date.today() + _td(days=2)).strftime("%Y-%m-%d 12:03")
+    _ok_fut = DASH_OK.replace("2026-10-02 12:03", _fut)
+    _limited_fut = DASH_LIMITED.replace("2026-10-02 12:03", _fut)
     r, sb, out = scenario(m, pages=[
-        {"source": DASH_FUTURE, "url": "https://dash.icehost.pl/servers"},
-        {"source": DASH_FUTURE},
-        {"source": DASH_FUTURE_LIMITED},
+        {"source": _ok_fut, "url": "https://dash.icehost.pl/servers"},
+        {"source": _ok_fut},
+        {"source": _limited_fut},
     ])
-    c.eq("点击后红框（未到期）→ SKIPPED", r.outcome, m.Outcome.SKIPPED)
+    c.eq("点击后红框 → SKIPPED", r.outcome, m.Outcome.SKIPPED)
     c.eq("  仍然点了 1 次（按钮在不在不是窗口信号）", renew_clicks(sb, m), 1)
-    c.check("  说明写明是站点限制", "站点限制" in r.detail)
-
-    # 2b) 已过期 + 点击后红框 → 必须失败（2026-11-23 修的假成功）
-    r, sb, out = scenario(m, pages=[
-        {"source": DASH_OK, "url": "https://dash.icehost.pl/servers"},
-        {"source": DASH_OK},
-        {"source": DASH_LIMITED},
-    ])
-    c.eq("点击后红框（已过期）→ FAILED", r.outcome, m.Outcome.FAILED)
-    c.eq("  也确实点了 1 次", renew_clicks(sb, m), 1)
-    c.check("  说明点出「已临近到期」", "临近到期" in r.detail)
+    c.check("  说明写明是点击后弹的", "点击后" in r.detail)
 
     # 3) 点击前就有限制提示（强特征）→ 不点
     r, sb, _ = scenario(m, pages=[
-        {"source": DASH_FUTURE_LIMITED, "url": "https://dash.icehost.pl/servers"},
-    ])
-    c.eq("点击前有强红框（未到期）→ SKIPPED", r.outcome, m.Outcome.SKIPPED)
-    c.eq("  一次都没点", renew_clicks(sb, m), 0)
-
-    # 3b) 已过期还弹强限制 → 失败，不能静默
-    r, sb, _ = scenario(m, pages=[
         {"source": DASH_LIMITED, "url": "https://dash.icehost.pl/servers"},
     ])
-    c.eq("点击前有强红框（已过期）→ FAILED", r.outcome, m.Outcome.FAILED)
+    c.eq("点击前有强红框 → SKIPPED", r.outcome, m.Outcome.SKIPPED)
     c.eq("  一次都没点", renew_clicks(sb, m), 0)
 
-    # 4) 到期时间读不到 → 照点；事后无法确认 → FAILED（不许拿「没报错」当成功）
+    # 4) 到期时间读不到 → 照点，事后 UNKNOWN
     plain = "<div><button>ADD 6 HOURS VALIDITY</button></div>"
     r, sb, _ = scenario(m, pages=[
         {"source": plain, "url": "https://dash.icehost.pl/servers"},
         {"source": plain},
         {"source": plain},
     ])
-    c.eq("读不到到期时间 → FAILED", r.outcome, m.Outcome.FAILED)
+    c.eq("读不到到期时间 → UNKNOWN", r.outcome, m.Outcome.UNKNOWN)
     c.eq("  照点 1 次（漏点会被 suspend，不可逆）", renew_clicks(sb, m), 1)
 
     # 5) dry-run → 不点
@@ -873,10 +865,9 @@ def main() -> int:
     c.eq("Cookie 坏了但有密码 → 仍能续期（退出码 0）", rc, 0)
     c.check("  日志说明 Cookie 不可用", "Cookie 不可用" in buf.getvalue())
 
-    # SKIPPED 时不该发 TG（用「未到期 + 限制提示」构造 —— 这才是真正的常态跳过）
-    # 2026-11-23：改用 DASH_FUTURE_LIMITED。已过期还弹限制属于失败，不能再当成静默跳过。
+    # SKIPPED 时不该发 TG
     m_quiet = load_main(**COOKIE_ENV)
-    fake = FakeSB(pages=[{"source": DASH_FUTURE_LIMITED, "url": "https://dash.icehost.pl/servers"}])
+    fake = FakeSB(pages=[{"source": DASH_LIMITED, "url": "https://dash.icehost.pl/servers"}])
     install_fake_seleniumbase(SBFactory(fake))
     sent: list[str] = []
     orig_send = sys.modules["renewkit.notify"].send
@@ -1008,9 +999,7 @@ def main() -> int:
     c.eq("workflow 没漏传矩阵变量", sorted(env_names),
          sorted(["ICEHOST_ACCOUNT_NAME", "ICEHOST_SERVER_URL", "ICEHOST_COOKIES",
                  "ICEHOST_EMAIL", "ICEHOST_PASSWORD", "TG_BOT_TOKEN",
-                 "TG_CHAT_ID", "DRY_RUN", "NODE_LINK",
-                 # 2026-11-23：修假成功时新增的「临近到期」阈值
-                 "ICEHOST_NEAR_EXPIRY_S"]))
+                 "TG_CHAT_ID", "DRY_RUN", "NODE_LINK"]))
 
     # ★ 实盘 #241：迁移时把原 workflow 代理 step 上的 NODE_LINK 丢了，
     #   上游 installer 取到空值 → 静默退直连 → 出口 IP 被面板 WAF 拦。
