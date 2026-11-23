@@ -370,6 +370,14 @@ def decide(before: str | None, after: str | None, *,
     ====== ==================== ==========================================
     """
     if limited_before:
+        # 2026-11-23 补：点前限制提示也不能无条件静默。
+        # 「面板要求到期后才能续」只解释了「未到期时弹限制」；已到期还弹就是异常 ——
+        # 该续却没续上，报 FAILED，否则同样是「静默烂到删机」的假成功（实测复现：
+        # before=今天、limited_before=True 旧版返回 SKIPPED/job 不红/TG 静默）。
+        if _expired_on(before, today):
+            return (Outcome.FAILED,
+                    f"已到期（{fmt_exp(before)}）但点击前就被拒绝续期（限制提示仍在），"
+                    "续期未生效 —— 这是异常，需人工进面板确认")
         return Outcome.SKIPPED, "未到可续期时点（面板要求到期后才能续，点前已有限制提示）"
     if extend_ok(before, after, lo=lo, hi=hi):
         return Outcome.RENEWED, ""
@@ -386,8 +394,10 @@ def decide(before: str | None, after: str | None, *,
                     "这是异常（该续却没续上），需人工处理")
         return Outcome.SKIPPED, "到期时间没变（未到可续期时点，属预期：面板要求到期后才能续）"
     if before and after:
-        return Outcome.UNKNOWN, f"到期时间异常：{fmt_exp(before)} → {fmt_exp(after)}"
-    return Outcome.UNKNOWN, f"{fmt_exp(before)} → {fmt_exp(after)}，未能确认结果"
+        return Outcome.FAILED, f"到期时间异常：{fmt_exp(before)} → {fmt_exp(after)}"
+    # 读不到到期时间：无法确认，按失败报（UNKNOWN 不红 job，等于静默）
+    return (Outcome.FAILED,
+            f"读不到到期时间（{fmt_exp(before)} → {fmt_exp(after)}），无法确认续期是否生效")
 
 
 #: 静默的结果：这两种不打扰人（未到窗口是常态；上游抖动等下次排程即可）
@@ -681,8 +691,17 @@ def run_browser() -> RunResult:
         source = sb.get_page_source()
         before = find_expiry(source)
         if has_limit_notice(source, strong_only=True):
-            return RunResult(Outcome.SKIPPED, "未到续期窗口", expire=before,
-                             shot=_shoot(sb, shot))
+            # 2026-11-23：点前限制同样分两档 —— 已到期还弹限制 = 异常，必须告警。
+            # 这条以前无条件 SKIPPED，等于绕过 decide() 的判定，是第二个假成功入口。
+            if _expired_on(before, None):
+                return RunResult(
+                    Outcome.FAILED,
+                    f"已到期（{fmt_exp(before)}）但点击前就被拒绝续期（限制提示仍在），"
+                    "续期未生效 —— 这是异常，需人工进面板确认",
+                    expire=before, shot=_shoot(sb, shot))
+            return RunResult(Outcome.SKIPPED,
+                             "未到可续期时点（面板要求到期后才能续）",
+                             expire=before, shot=_shoot(sb, shot))
         print(f"📅 续期前到期时间: {fmt_exp(before)}", flush=True)
 
         if DRY_RUN:
