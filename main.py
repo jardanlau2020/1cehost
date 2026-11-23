@@ -84,6 +84,14 @@ DRY_RUN = env.dry_run()
 EXTEND_MIN_S = env.get_int("ICEHOST_EXTEND_MIN_S", 5 * 3600)
 EXTEND_MAX_S = env.get_int("ICEHOST_EXTEND_MAX_S", 9 * 3600)
 
+#: 「已临近到期」阈值：剩余 ≤ 2 小时（或已过期）时，这一轮没续上就是**真失败**。
+#:
+#: 2026-11-23 修假成功时引入。背景：面板一次只 +6h、服务器有效期 24h，每小时跑一次，
+#: 所以「没续上」在离到期还远时是常态（窗口没开），临近到期时才是事故。
+#: 没有这层区分的话，要么把已过期误判成「状态良好」（旧 bug），要么每小时刷 24 条
+#: 假告警（过度纠正）。阈值可通过 ICEHOST_NEAR_EXPIRY_S 覆盖。
+NEAR_EXPIRY_S = env.get_int("ICEHOST_NEAR_EXPIRY_S", 2 * 3600)
+
 #: 点击后等红框渲染的时间，以及刷新后等 SPA 重新拉数据的时间
 CLICK_WAIT_S = env.get_int("ICEHOST_CLICK_WAIT_S", 5)
 REFRESH_WAIT_S = env.get_int("ICEHOST_REFRESH_WAIT_S", 5)
@@ -307,26 +315,85 @@ def looks_logged_out(url: str, page_source: str, has_password_field: bool) -> bo
     return any(m in low for m in LOGIN_MARKERS)
 
 
+def expiry_remaining_s(before: str | None, *, now: datetime | None = None) -> float | None:
+    """离到期还剩多少秒；读不到到期时间返回 ``None``。负数表示已过期。"""
+    dt = parse_expiry_dt(before)
+    if dt is None:
+        return None
+    return (dt - (now or datetime.now())).total_seconds()
+
+
+def is_critical(before: str | None, *, now: datetime | None = None,
+                near: int = NEAR_EXPIRY_S) -> bool | None:
+    """是否「已过期或即将到期」。
+
+    ``True`` = 这一轮没续上就是真失败；``False`` = 还没到窗口，没续上是常态；
+    ``None`` = 到期时间读不到，无法判断。
+    """
+    rem = expiry_remaining_s(before, now=now)
+    return None if rem is None else rem <= near
+
+
 def decide(before: str | None, after: str | None, *,
            limited_before: bool = False, limited_after: bool = False,
-           lo: int = EXTEND_MIN_S, hi: int = EXTEND_MAX_S) -> tuple[Outcome, str]:
+           lo: int = EXTEND_MIN_S, hi: int = EXTEND_MAX_S,
+           now: datetime | None = None) -> tuple[Outcome, str]:
     """点击前后的观测 → ``(结论, 说明)``。
 
     抽成纯函数是为了把「红框出现在点击前还是点击后」「到期时间读不到」
     「时间没变」「时间跳了几天」这些组合全都能离线测一遍 —— 浏览器里的分支
     靠人工点不出来。
+
+    **成功只有一个出口**：``after`` 比 ``before`` 晚 5~9 小时（:func:`extend_ok`）。
+    其余一切 —— 时间没变、读不到、时间跳变、面板弹限制 —— 都不许当成功：
+      · 离到期还远（:func:`is_critical` 为 False）→ ``SKIPPED``，静默，等下一轮；
+      · 已过期 / 剩余 ≤ ``NEAR_EXPIRY_S`` → ``FAILED``，必须告警。
+
+    2026-11-23 修的就是这一步：旧版把「点击后弹限制提示」和「时间没变」无条件判
+    ``SKIPPED``，而 ``SKIPPED`` 在 :data:`QUIET_OUTCOMES` 里 ⇒ 已过期也报「状态良好」、
+    不告警，会静默烂到删机。
     """
-    if limited_before:
-        return Outcome.SKIPPED, "未到续期窗口"
+    # ① 唯一成功路径：数值上真的 +6h
     if extend_ok(before, after, lo=lo, hi=hi):
         return Outcome.RENEWED, ""
+
+    critical = is_critical(before, now=now)
+
+    # ② 读不到到期时间 → 无法确认，按失败处理（不能拿「没报错」当成功）
+    if before is None or after is None:
+        if limited_before and before is None:
+            # 点击前就有限制提示、且页面本就没渲染到期时间 → 窗口没开，属常态
+            return (Outcome.SKIPPED,
+                    "站点限制：点击前面板已提示不可续期（未读到到期时间）")
+        return (Outcome.FAILED,
+                f"读不到到期时间（{fmt_exp(before)} → {fmt_exp(after)}），"
+                "无法确认续期是否生效")
+
+    # ③ 点击前就有限制提示
+    if limited_before:
+        if critical:
+            return (Outcome.FAILED,
+                    f"站点限制：点击前面板已拒绝续期，但已临近到期（{fmt_exp(before)}）")
+        return Outcome.SKIPPED, "站点限制：未到可续期时间"
+
+    # ④ 点击后弹「限制提示」—— 已知失败形态（冷却 / 刚续过）
     if limited_after:
-        return Outcome.SKIPPED, "未到续期窗口（点击后弹出限制提示）"
-    if before and after and before == after:
-        return Outcome.SKIPPED, "到期时间没变，未到续期窗口"
-    if before and after:
-        return Outcome.UNKNOWN, f"到期时间异常：{fmt_exp(before)} → {fmt_exp(after)}"
-    return Outcome.UNKNOWN, f"{fmt_exp(before)} → {fmt_exp(after)}，未能确认结果"
+        if critical:
+            return (Outcome.FAILED,
+                    f"站点限制（冷却中）：点击后弹「刚续过」提示，但已临近到期仍未加上 6 小时"
+                    f"（{fmt_exp(before)} → {fmt_exp(after)}）")
+        return Outcome.SKIPPED, "站点限制（冷却中）：未到可续期时间，本次跳过"
+
+    # ⑤ 时间没变
+    if before == after:
+        if critical:
+            return (Outcome.FAILED,
+                    f"续期未生效：到期时间没变（{fmt_exp(before)}），已临近到期")
+        return Outcome.SKIPPED, "到期时间没变（未到续期窗口）"
+
+    # ⑥ 时间跳变（既非 +6h 也非不变）→ 异常，必须人看
+    return (Outcome.FAILED,
+            f"到期时间异常：{fmt_exp(before)} → {fmt_exp(after)}")
 
 
 #: 静默的结果：这两种不打扰人（未到窗口是常态；上游抖动等下次排程即可）
@@ -620,7 +687,14 @@ def run_browser() -> RunResult:
         source = sb.get_page_source()
         before = find_expiry(source)
         if has_limit_notice(source, strong_only=True):
-            return RunResult(Outcome.SKIPPED, "未到续期窗口", expire=before,
+            # 2026-11-23：限制提示不再无条件当「跳过」。已过期 / 临近到期还弹这个，
+            # 说明站点在拒绝续期，必须告警，否则会静默烂到删机（旧 bug）。
+            if is_critical(before):
+                return RunResult(
+                    Outcome.FAILED,
+                    f"站点限制：点击前面板已拒绝续期，但已临近到期（{fmt_exp(before)}）",
+                    expire=before, shot=_shoot(sb, shot))
+            return RunResult(Outcome.SKIPPED, "站点限制：未到可续期时间", expire=before,
                              shot=_shoot(sb, shot))
         print(f"📅 续期前到期时间: {fmt_exp(before)}", flush=True)
 
