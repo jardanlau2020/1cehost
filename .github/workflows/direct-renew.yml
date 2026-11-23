@@ -3,9 +3,22 @@ name: Auto Renew
 # 1cehost 续期主流程。业务逻辑在 main.py；Python/依赖/通知/退出码这些通用部分
 # 走 renew-kit 的 composite action，不再手写。
 #
-# 排程：每小时一次。面板的续期窗口是 6 小时，而且「窗口开了才准点」，
-# 5 小时一次的 cron 追不上窗口（2026-09-16 病史：miss 2 次 → 服务器 suspended）。
-# 本仓已转 public，Actions 分钟数免费，所以直接每小时跑，保证窗口必中。
+# ── 排程：cron 只是兜底，真正的保障靠外部触发 ──────────────────────────
+# 面板的续期窗口是 6 小时，而且必须「过期之后」才能续（见 README 的实测），
+# 所以触发频率必须高于 6 小时，否则一次 miss 就可能 suspended
+# （2026-09-16 病史：miss 2 次 → 服务器 suspended）。
+#
+# 2026-11-23 实测：GitHub 对高频 schedule 有丢弃，不能按 cron 表达式算频率。
+# 本仓 2026-10-14~11-23 共 400 个 run：cron 声明 24 次/天，schedule 实际只落到
+# 每天 3~5 次，间隔 4.2~9.4h（均值约 7h）—— 达成率 15~20%。
+# 对照组（公开实测）：声明 4 次/小时实得 1~2 次，改成 2 次/小时实得仍是 1~2 次，
+# 说明 cron 表达式只是「上限」，不是「合同」，加时间点不会变多。
+#
+# ⇒ 真正的触发源是大阪 VPS 的 crontab（每 30 分钟 dispatch 一次），见文件末尾。
+#   cron 保留 `17 * * * *` 只作兜底；取 :17 而不是 :00，因为整点是全球 cron 扎堆的
+#   高峰，GitHub 官方明确说高负载时段包含「每小时开始」，实测挪到奇数分钟能显著
+#   降低延迟。
+#
 # 窗口没开时脚本静默 exit 0，也不发 TG（见 main.py 的 should_notify）。
 
 on:
@@ -19,7 +32,7 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: '0 * * * *'
+    - cron: '17 * * * *'
 
 permissions:
   contents: read
@@ -88,3 +101,22 @@ jobs:
           # 的代理 step 里丢了）。setup_proxy.sh 里也加了空值告警兜底。
           NODE_LINK: ${{ secrets.NODE_LINK }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '' }}
+
+# ══════════════════════════════════════════════════════════════════════════
+# 外部触发源 —— 别再查「谁在 dispatch」了，就是这里
+#
+#   主机     159.13.38.22（大阪 VPS，Debian 10，root）
+#   脚本     /root/.config/scripts/1cehost-dispatch.sh      chmod 700 root:root
+#   crontab  */30 * * * * /root/.config/scripts/1cehost-dispatch.sh
+#   凭据     /root/.config/1cehost-token                    chmod 600 root:root
+#            脚本内 `TOKEN=$(cat ...)` 引用；不进命令行、不打印、不进日志
+#   日志     /var/log/1cehost-dispatch.log                  chmod 600
+#            每行 = UTC 时间 + HTTP 状态码（204 = dispatch 成功）
+#
+# 由来：2026-11-23 查「为什么每小时的 cron 每天只跑 3~5 次」时，发现一半 run 是
+# workflow_dispatch 却没人认领，查了好几轮才定位到这个外部脚本。所以把出处写死在
+# 这里，避免下次再变成悬案。
+#
+# 想停掉它：`crontab -e` 删掉那行，或 `chmod -x /root/.config/scripts/1cehost-dispatch.sh`。
+# 相关的节流实测数据见本文件开头的排程说明。
+# ══════════════════════════════════════════════════════════════════════════

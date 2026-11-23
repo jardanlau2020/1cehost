@@ -6,10 +6,37 @@
 面板前面有 WAF + Cloudflare，所以用真实浏览器（SeleniumBase 的 UC 模式 +
 xvfb 虚拟桌面）发系统级点击过盾，而不是裸 HTTP 请求。
 
+## 谁在触发这个 workflow（2026-11-23 加，别再查了）
+
+触发有两条路，**真正的保障是第二条**：
+
+| 触发源 | 频率 | 角色 |
+|---|---|---|
+| GitHub cron `17 * * * *` | 声明每小时，**实得每天 3~5 次** | 兜底 |
+| **大阪 VPS 159.13.38.22 的 crontab** | 每 30 分钟，实际打得到 | **主路径** |
+
+为什么不能靠 cron：本仓 2026-10-14~11-23 共 400 个 run，cron 声明 24 次/天，
+`schedule` 事件实际只落到 3~5 次/天，间隔 4.2~9.4h（均值约 7h），达成率 15~20%。
+公开对照实验也一样：声明 4 次/小时实得 1~2 次，降到 2 次/小时实得仍是 1~2 次——
+**cron 表达式只是上限，不是合同**。而面板只给 6 小时寿命，靠这个频率必挂。
+
+外部触发的落地细节：
+
+```
+主机     159.13.38.22（大阪 VPS，Debian 10，root）
+脚本     /root/.config/scripts/1cehost-dispatch.sh           700 root:root
+crontab  */30 * * * * /root/.config/scripts/1cehost-dispatch.sh
+凭据     /root/.config/1cehost-token                         600 root:root
+         脚本内 cat 引用，不进命令行、不打印、不进日志
+日志     /var/log/1cehost-dispatch.log                       600
+         每行 = UTC 时间 + HTTP 状态码（204 = dispatch 成功）
+```
+
+停用：`crontab -e` 删掉那行，或 `chmod -x` 那个脚本。
+
 ## 它是怎么工作的
 
-`.github/workflows/direct-renew.yml` 每小时（`0 * * * *`）跑一次，对两个账号
-各起一个 job：
+`.github/workflows/direct-renew.yml` 对两个账号各起一个 job（触发方式见上一节）：
 
 1. `actions/checkout` 拉代码
 2. `scripts/setup_proxy.sh` 尽力挂一个 sing-box 代理换出口（失败就退回直连）
