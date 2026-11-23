@@ -48,7 +48,8 @@ STAGED_WORKFLOWS = {"direct-renew.yml"}
 
 #: 有默认值的调参项，不要求 workflow 一定传
 OPTIONAL_ENV = {"ICEHOST_EXTEND_MIN_S", "ICEHOST_EXTEND_MAX_S", "ICEHOST_CLICK_WAIT_S",
-                "ICEHOST_REFRESH_WAIT_S", "ICEHOST_SHOT_DIR"}
+                "ICEHOST_REFRESH_WAIT_S", "ICEHOST_SHOT_DIR",
+                "ICEHOST_RENEW_WINDOW_H", "ICEHOST_PANEL_TZ_OFFSET_H"}
 
 #: 迁移前的原始判据，用来证明语义没被偷偷改掉
 ORIGINAL_LIMIT_KEYWORDS = ("Nie możesz przedłużyć", "niedawno to zrobiłeś",
@@ -387,6 +388,12 @@ DASH_LIMITED = DASH_OK + '<div class="alert">Nie możesz przedłużyć serwera, 
 LOGIN_PAGE = '<form><input name="username"><input type="password"></form>Zaloguj się'
 
 
+def _panel_now():
+    """面板时区（UTC+8）的「现在」，用来造「还差几小时到期」这种时刻相关的页面。"""
+    from datetime import datetime, timedelta, timezone
+    return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=8)
+
+
 def scenario(mod, *, pages, **sb_kwargs):
     """跑一次 run_browser()，返回 (RunResult, FakeSB, 日志)。"""
     fake = FakeSB(pages=pages, **sb_kwargs)
@@ -396,6 +403,32 @@ def scenario(mod, *, pages, **sb_kwargs):
     with redirect_stdout(buf):
         result = mod.run_browser()
     return result, fake, buf.getvalue()
+
+
+class _FakeToday:
+    """把 main 里的 `date.today()` 往前挪几天。
+
+    为的是造「到期日就是今天、但时刻还没到」的页面：`_expired_on` 只比日期
+    （面板时区未定，按天比是刻意的），所以真实时钟下「还差 1 小时到期」会被
+    当成「已到期」。要测「未到窗口」这条常态路径，就得把「今天」挪到昨天。
+    """
+
+    def __init__(self, days_ago: int = 1) -> None:
+        self.days_ago = days_ago
+
+    def today(self):
+        from datetime import date, timedelta
+        return date.today() - timedelta(days=self.days_ago)
+
+
+def scenario_before_expiry(mod, *, pages, **sb_kwargs):
+    """同 scenario()，但把「今天」当成昨天（页面日期还在未来）。"""
+    real = mod.date
+    mod.date = _FakeToday()
+    try:
+        return scenario(mod, pages=pages, **sb_kwargs)
+    finally:
+        mod.date = real
 
 
 # ----------------------------------------------------------------- 主流程
@@ -507,6 +540,39 @@ def main() -> int:
     c.check("读不到 before → 否", not ek(None, "2026-10-02 18:03"))
     c.check("读不到 after → 否", not ek("2026-10-02 12:03", None))
     c.eq("容差窗口与老实现一致", (mod.EXTEND_MIN_S, mod.EXTEND_MAX_S), ORIGINAL_EXTEND_WINDOW)
+
+    # ─────────────────────────── [B3b] 距到期还有几小时（决定点不点）
+    c.section("[B3b] _hours_until：太早不点按钮")
+    from datetime import datetime as _dt, timedelta as _td2
+    hu = mod._hours_until
+
+    c.eq("读不到日期 → None", hu(None), None)
+    c.eq("空串 → None", hu(""), None)
+    c.eq("垃圾串 → None", hu("n/a"), None)
+    # 面板时间 T、当前面板时间 now ⇒ 差值。全部用显式 now，结果与运行时刻无关。
+    _P = _dt(2026, 11, 23, 20, 3)                       # 伪「面板现在」
+    c.eq("正好 2h → 2.0", round(hu("2026-11-23 22:03", _P), 6), 2.0)
+    c.eq("略大于 2h（+1 分钟）",
+         round(hu("2026-11-23 22:04", _P), 6), round(2 + 1 / 60, 6))
+    c.eq("略小于 2h（-1 分钟）",
+         round(hu("2026-11-23 22:02", _P), 6), round(2 - 1 / 60, 6))
+    c.eq("已过期 1 小时 → -1.0", round(hu("2026-11-23 19:03", _P), 6), -1.0)
+    c.eq("跨月：11-30 21:03 → 12-01 00:03 = 3h",
+         round(hu("2026-12-01 00:03", _dt(2026, 11, 30, 21, 3)), 6), 3.0)
+    c.eq("跨年：12-31 22:00 → 01-01 02:00 = 4h",
+         round(hu("2027-01-01 02:00", _dt(2026, 12, 31, 22, 0)), 6), 4.0)
+    # 面板时区换算：UTC 16:03 就是北京 00:03，与到期同一时刻 ⇒ 0h
+    c.eq("时区换算（UTC+8）",
+         round(hu("2026-11-24 00:03",
+                  _dt(2026, 11, 23, 16, 3) + _td2(hours=8)), 6), 0.0)
+    c.eq("偏移量默认 UTC+8", mod.PANEL_TZ_OFFSET_H, 8)
+    c.eq("窗口默认 2 小时", mod.RENEW_WINDOW_H, 2)
+
+    # 与真实时钟的一致性：用「面板现在 +4h」造日期，读回来必须接近 4
+    _real = _panel_now() + _td2(hours=4)
+    _got = hu(_real.strftime("%Y-%m-%d %H:%M"))
+    c.check("真实时钟：现在+4h → ≈4（±0.05）", _got is not None and abs(_got - 4) < 0.05,
+            f"got={_got!r}")
 
     # ─────────────────────────── [B4] 红框特征（强弱两档）
     c.section("[B4] has_limit_notice：点击前只用强特征")
@@ -689,13 +755,13 @@ def main() -> int:
     c.check("  日志打了续期前后的时间", "12:03" in out and "18:03" in out)
 
     # 2) 窗口未开：点击后弹红框（实盘 #237/#239 的真实路径）
-    # 到期日换成「未来」，否则 2026-10-02 早过期了，会被判成「已到期 → FAILED」
-    # （那是 [B7b] 的用例，不是这里要测的「未到窗口」常态）。
+    # 到期时间必须落在 RENEW_WINDOW_H 之内（面板时区 +1h），否则会被新的
+    # 「距到期太远 → 不点」提前拦下 —— 那条是本文件 [B8] 的用例。
     from datetime import timedelta as _td
-    _fut = (_date.today() + _td(days=2)).strftime("%Y-%m-%d 12:03")
+    _fut = (_panel_now() + _td(hours=1)).strftime("%Y-%m-%d %H:%M")
     _ok_fut = DASH_OK.replace("2026-10-02 12:03", _fut)
     _limited_fut = DASH_LIMITED.replace("2026-10-02 12:03", _fut)
-    r, sb, out = scenario(m, pages=[
+    r, sb, out = scenario_before_expiry(m, pages=[
         {"source": _ok_fut, "url": "https://dash.icehost.pl/servers"},
         {"source": _ok_fut},
         {"source": _limited_fut},
@@ -704,9 +770,23 @@ def main() -> int:
     c.eq("  仍然点了 1 次（按钮在不在不是窗口信号）", renew_clicks(sb, m), 1)
     c.check("  说明写明是点击后弹的", "点击后" in r.detail)
 
+    # 2b) 距到期还有 5 小时 → 连按钮都不点（面板一次 +6h、冷却 6h，早点必被拒）
+    #     2026-11-23 实盘：11:33 那轮空跑 116 秒才发现「时间没变」。
+    _far = (_panel_now() + _td(hours=5)).strftime("%Y-%m-%d %H:%M")
+    _ok_far = DASH_OK.replace("2026-10-02 12:03", _far)
+    r, sb, out = scenario(m, pages=[
+        {"source": _ok_far, "url": "https://dash.icehost.pl/servers"},
+        {"source": _ok_far},
+        {"source": _ok_far},
+    ])
+    c.eq("距到期 5h → SKIPPED", r.outcome, m.Outcome.SKIPPED)
+    c.eq("  一次都没点", renew_clicks(sb, m), 0)
+    c.check("  说明带剩余小时数", "距到期还有" in r.detail and "小时" in r.detail)
+    c.check("  日志也记了剩余小时数", "本轮不点按钮" in out)
+
     # 3) 点击前就有限制提示（强特征）→ 不点
     #    3a) 未到期：正常态，静默跳过
-    r, sb, _ = scenario(m, pages=[
+    r, sb, _ = scenario_before_expiry(m, pages=[
         {"source": _limited_fut, "url": "https://dash.icehost.pl/servers"},
     ])
     c.eq("点击前有强红框（未到期）→ SKIPPED", r.outcome, m.Outcome.SKIPPED)
@@ -885,12 +965,15 @@ def main() -> int:
     sent: list[str] = []
     orig_send = sys.modules["renewkit.notify"].send
     sys.modules["renewkit.notify"].send = lambda text, **k: sent.append(text) or True
+    _real_date = m_quiet.date
+    m_quiet.date = _FakeToday()          # 「今天」挪到昨天：页面日期在未来，才走「未到窗口」
     try:
         buf = io.StringIO()
         with redirect_stdout(buf):
             rc = m_quiet.main()
     finally:
         sys.modules["renewkit.notify"].send = orig_send
+        m_quiet.date = _real_date
     c.eq("SKIPPED → 退出码 0", rc, 0)
     c.eq("SKIPPED → 一条 TG 都不发", len(sent), 0)
 
@@ -998,7 +1081,11 @@ def main() -> int:
             "*.png" in wf and mod.SHOT_NAME.endswith(".png"))
     c.check("不再手写 setup-python（交给 action）", "actions/setup-python@" not in wf)
     c.check("不再手写 apt（交给 action）", "apt-get install" not in wf)
-    c.check("保留每小时 cron", "'0 * * * *'" in wf)
+    # 断言改成「有小时级 cron」而不是钉死分钟数：2026-11-23 主路径换到大阪 VPS 的
+    # crontab 之后，workflow 里的 cron 从 `0 * * * *` 改成了 `17 * * * *`（避开整点
+    # 扎堆），钉死分钟会误报。真正要守的是「还有小时级兜底」。
+    c.check("保留每小时 cron（分钟不钉死）",
+            re.search(r"cron:\s*'\d+ \* \* \* \*'", wf) is not None)
     c.check("保留 2 账号矩阵", 'account: ["01", "02"]' in wf)
     c.check("保留 fail-fast: false", "fail-fast: false" in wf)
     c.check("加了并发锁（同账号不重叠）", "concurrency:" in wf)
@@ -1037,7 +1124,7 @@ def main() -> int:
         rel = f.relative_to(ROOT).as_posix()
         c.check(f"README 目录树里的 {rel} 存在", f.is_file())
     for token in ("ICEHOST_COOKIES", "ICEHOST_SERVER_URL", "TG_BOT_TOKEN", "TG_CHAT_ID",
-                  "NODE_LINK", "0 * * * *", "RENEWED", "SKIPPED", "TRANSIENT", "UNKNOWN",
+                  "NODE_LINK", "17 * * * *", "RENEWED", "SKIPPED", "TRANSIENT", "UNKNOWN",
                   "FAILED", "renew-kit"):
         c.check(f"README 写了 {token}", token in rd)
     c.check("README 说明了跳过时静默", "静默" in rd)
