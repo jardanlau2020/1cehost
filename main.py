@@ -318,6 +318,21 @@ def _expired_on(before: str | None, today: date | None) -> bool:
     只比日期、不比时刻：面板时区未确认（波兰站），按天比能把时区误差
     （±8h）压到不影响判断。
     """
+    # ── 站点机制（2026-11-23 实测，11 次取样）：**必须过期之后才能续** ──
+    # 不是「窗口提前开」，而是「到期后才能续」：
+    #   · 每一次成功都发生在到期之后（过期 1–3.5 小时）；
+    #   · 每一次失败都发生在到期之前。
+    # 拒绝文案是波兰语 LIMIT_STRONG 里那两条：
+    #   `nie możesz przedłużyć`（不能续期）、`niedawno to zrobiłeś`（最近刚做过）
+    #   + 「下一次在 6 小时后」。
+    # 注意：它是 Selenium 能看到的**红框弹窗**，没有 HTTP 状态码，
+    # 所以判定只能看页面文案 + 到期日，不能看 response.status。
+    #
+    # ── 结构性缺陷（方案固有，不是 bug，别去「修」它）──
+    # 面板一次只 +6h、冷却 6h ⇒ **扩期速度 = 消耗速度**，剩余时间永远贴着 0。
+    # 任何 cron 排队迟到（GHA 免费 runner 很常见，能迟几小时）就会直接过期几小时。
+    # 所以「贴着 0 天」是这套方案的正常稳态，不是异常；
+    # 真正要告警的只有一件事：**已过期了还没续上**。
     b = parse_expiry_dt(before)
     if b is None:
         return False
@@ -338,22 +353,38 @@ def decide(before: str | None, after: str | None, *,
 
     判定铁律：**必须拿到新的到期日、且确实变晚（``extend_ok``）才算续上。**
     「已到期但没变」一律按失败报出去，不许落进静默分支。
+
+    三类判定（1cehost 面板要求「到期后才能续」，别按「窗口提前开」理解）：
+
+    ====== ==================== ==========================================
+    场景   结论                 为什么
+    ====== ==================== ==========================================
+    未到期  ``SKIPPED`` 静默    到期日在未来 ⇒ 面板本来就拒绝，属预期。
+                               文案写明「未到可续期时点（需先过期）」，
+                               不告警，否则每小时一条噪音。
+    已到期  ``FAILED`` 告警    当天或更早已经该续了，还被拒 ⇒ 真异常。
+    （当天  ——                  这是唯一要惊动人的情况。
+    或更早）
+    读不到  ``UNKNOWN``/失败   拿不到到期日就没法确认，不许拿「没报错」
+                               当成功。
+    ====== ==================== ==========================================
     """
     if limited_before:
-        return Outcome.SKIPPED, "未到续期窗口"
+        return Outcome.SKIPPED, "未到可续期时点（面板要求到期后才能续，点前已有限制提示）"
     if extend_ok(before, after, lo=lo, hi=hi):
         return Outcome.RENEWED, ""
     if limited_after:
         if _expired_on(before, today):
             return (Outcome.FAILED,
                     f"已到期（{fmt_exp(before)}）却仍弹限制提示，续期未生效 —— "
-                    "不是「未到窗口」，需人工进面板确认")
-        return Outcome.SKIPPED, "未到续期窗口（点击后弹出限制提示）"
+                    "这不是「未到可续期时点」，是异常（该续却没续上），需人工进面板确认")
+        return Outcome.SKIPPED, "未到可续期时点（点击后弹出限制提示，属预期：面板要求到期后才能续）"
     if before and after and before == after:
         if _expired_on(before, today):
             return (Outcome.FAILED,
-                    f"已到期（{fmt_exp(before)}）但到期时间没变，续期未生效 —— 需人工处理")
-        return Outcome.SKIPPED, "到期时间没变，未到续期窗口"
+                    f"已到期（{fmt_exp(before)}）但到期时间没变，续期未生效 —— "
+                    "这是异常（该续却没续上），需人工处理")
+        return Outcome.SKIPPED, "到期时间没变（未到可续期时点，属预期：面板要求到期后才能续）"
     if before and after:
         return Outcome.UNKNOWN, f"到期时间异常：{fmt_exp(before)} → {fmt_exp(after)}"
     return Outcome.UNKNOWN, f"{fmt_exp(before)} → {fmt_exp(after)}，未能确认结果"
