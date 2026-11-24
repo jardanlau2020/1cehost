@@ -63,7 +63,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
-from renewkit import Outcome, RenewReport
+from renewkit import Outcome, RenewReport, verdict
 from renewkit import env
 from renewkit import notify
 from renewkit.report import shorten
@@ -787,12 +787,16 @@ def main() -> int:
 
     if not SERVER_URL:
         report.add(target, Outcome.FAILED, detail="缺少 ICEHOST_SERVER_URL")
+        verdict.record(report.worst, detail=" | ".join(
+            f"{r.name}:{r.outcome.value}" for r in report.results))
         return report.finish()
 
     has_fallback_login = bool(EMAIL and PASSWORD)
     if not COOKIES_RAW and not has_fallback_login:
         report.add(target, Outcome.FAILED,
                    detail="缺少 ICEHOST_COOKIES，且未配置 ICEHOST_EMAIL/PASSWORD")
+        verdict.record(report.worst, detail=" | ".join(
+            f"{r.name}:{r.outcome.value}" for r in report.results))
         return report.finish()
 
     try:
@@ -805,6 +809,9 @@ def main() -> int:
     if result.outcome is Outcome.FAILED and result.shot:
         send_photo(result.shot, f"📸 {target} · 排障截图")
 
+    # 落判据给 renew-kit 的 Gate 步骤读；与 finish() 退出码同源同口径。
+    verdict.record(report.worst, detail=" | ".join(
+        f"{r.name}:{r.outcome.value}" for r in report.results))
     return report.finish(notify_tg=should_notify(report))
 
 
