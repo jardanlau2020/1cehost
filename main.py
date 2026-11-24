@@ -95,6 +95,14 @@ REFRESH_WAIT_S = env.get_int("ICEHOST_REFRESH_WAIT_S", 5)
 #: 红框「不能续期，下一次在 6 小时后」，整轮白耗 116 秒，一天 24 次。
 RENEW_WINDOW_H = env.get_int("ICEHOST_RENEW_WINDOW_H", 2)
 
+#: 2026-11-24 修复：面板一次 +6h、冷却 6h。到期时间 = 上次成功续期(renewal) + 6h，
+#: 所以「上次成功时刻」可从到期时间反推（到期 - 6h），不必另存状态。
+#: 冷却期内点了必被 "did it recently" 拒，白耗浏览器还会误报 FAILED。
+#: 关键：冷却(6h) 比点击窗口(2h) 长 —— 到期前 2h 之内多半仍在冷却，
+#: 必须先用冷却把关，否则就会在 16/17/18 点连续假红（run #790 实证）。
+EXTEND_H = env.get_int("ICEHOST_EXTEND_H", 6)
+COOLDOWN_H = env.get_int("ICEHOST_COOLDOWN_H", 6)
+
 #: 面板显示的到期时间是哪个时区（小时偏移，默认 +8 = 北京时间），不是波兰 CET。
 #: 依据：11-23 19:05 那次续期成功时，面板到期时间记 11-23 18:03。
 #: 按 CET(+1) 算当时还没到期、本该被拒；按 UTC+8 算已过期 1 小时，与「成功」吻合。
@@ -338,42 +346,66 @@ def looks_logged_out(url: str, page_source: str, has_password_field: bool) -> bo
     return any(m in low for m in LOGIN_MARKERS)
 
 
-def _expired_on(before: str | None, today: date | None) -> bool:
-    """``before`` 这一天是否已经到期（当天或更早）。
+def _panel_now(now: datetime | None = None,
+               *, tz_offset_h: int = PANEL_TZ_OFFSET_H) -> datetime:
+    """面板时区(UTC+8)下的「现在」，naive datetime，供时刻比较用。测试可注入 now。"""
+    if now is not None:
+        return now
+    return datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=tz_offset_h)
 
-    为什么要单独判：1cehost 的到期页在「已到期」时同样会弹限制提示/时间不变。
-    旧逻辑把它一并当「未到续期窗口」→ SKIPPED → 静默 → 报「状态良好（剩 0 天）」
-    的假成功（2026-11-23 实盘：到期 11-23 18:03，日志却打 🟢 状态良好）。
-    已到期却续不上，是失败，不是常态。
 
-    只比日期、不比时刻：面板时区未确认（波兰站），按天比能把时区误差
-    （±8h）压到不影响判断。
+def _expired_on(before: str | None, today: date | None = None, *,
+                now: datetime | None = None,
+                tz_offset_h: int = PANEL_TZ_OFFSET_H) -> bool:
+    """``before`` 到期时刻是否已经过去（在面板时区 UTC+8 下比时刻，不比日期）。
+
+    2026-11-24 修复（run #790 假警报根因）：旧版 ``b.date() <= today`` 只比日期，
+    把「今天 18:03 才到期」当天就算成「已到期」——16:07 明明还有近 2h 才到期，
+    却报「已到期却没续上」的 FAILED。改成比时刻：只有 ``now_local > expiry``
+    才算真过期。``today`` 形参保留只为兼容旧调用，逻辑不再用它。
+
+    到期时刻本身可信（#787-790 都读到 18:03 且与实际相符），时段比较即可。
     """
-    # ── 站点机制（2026-11-23 实测，11 次取样）：**必须过期之后才能续** ──
-    # 不是「窗口提前开」，而是「到期后才能续」：
-    #   · 每一次成功都发生在到期之后（过期 1–3.5 小时）；
-    #   · 每一次失败都发生在到期之前。
-    # 拒绝文案是波兰语 LIMIT_STRONG 里那两条：
-    #   `nie możesz przedłużyć`（不能续期）、`niedawno to zrobiłeś`（最近刚做过）
-    #   + 「下一次在 6 小时后」。
-    # 注意：它是 Selenium 能看到的**红框弹窗**，没有 HTTP 状态码，
-    # 所以判定只能看页面文案 + 到期日，不能看 response.status。
-    #
-    # ── 结构性缺陷（方案固有，不是 bug，别去「修」它）──
-    # 面板一次只 +6h、冷却 6h ⇒ **扩期速度 = 消耗速度**，剩余时间永远贴着 0。
-    # 任何 cron 排队迟到（GHA 免费 runner 很常见，能迟几小时）就会直接过期几小时。
-    # 所以「贴着 0 天」是这套方案的正常稳态，不是异常；
-    # 真正要告警的只有一件事：**已过期了还没续上**。
     b = parse_expiry_dt(before)
     if b is None:
         return False
-    return b.date() <= (today or date.today())
+    return _panel_now(now, tz_offset_h=tz_offset_h) > b
+
+
+def last_success_from_expiry(before: str | None,
+                             *, extend_h: int = EXTEND_H) -> datetime | None:
+    """由面板到期时间反推「上次成功续期(renewal)时刻」= 到期 - 6h。
+
+    面板每次续期 +6h，到期 = renewal + 6h，所以 renewal = 到期 - 6h。
+    这是老板要求的「到期判定读 renewal 字段推算」：冷却起点用推算出的
+    renewal，而不是拿展示的到期时刻当续期时刻。读不到到期返回 None。
+    """
+    b = parse_expiry_dt(before)
+    if b is None:
+        return None
+    return b - timedelta(hours=extend_h)
+
+
+def in_cooldown(before: str | None, *, now: datetime | None = None,
+                cooldown_h: int = COOLDOWN_H,
+                extend_h: int = EXTEND_H,
+                tz_offset_h: int = PANEL_TZ_OFFSET_H) -> bool:
+    """是否仍在「上次成功续期后 6h 冷却」内 —— 冷却期内点了必被 did it recently 拒。
+
+    判据：``now_local < renewal + cooldown_h``，其中 renewal = 到期 - extend_h。
+    读不到到期时间时返回 False（不当成冷却，避免永远不点导致 suspend）。
+    """
+    renewal = last_success_from_expiry(before, extend_h=extend_h)
+    if renewal is None:
+        return False
+    return _panel_now(now, tz_offset_h=tz_offset_h) < renewal + timedelta(hours=cooldown_h)
 
 
 def decide(before: str | None, after: str | None, *,
            limited_before: bool = False, limited_after: bool = False,
            lo: int = EXTEND_MIN_S, hi: int = EXTEND_MAX_S,
-           today: date | None = None) -> tuple[Outcome, str]:
+           today: date | None = None,
+           now: datetime | None = None) -> tuple[Outcome, str]:
     """点击前后的观测 → ``(结论, 说明)``。
 
     抽成纯函数是为了把「红框出现在点击前还是点击后」「到期时间读不到」
@@ -400,26 +432,34 @@ def decide(before: str | None, after: str | None, *,
                                当成功。
     ====== ==================== ==========================================
     """
+    # 2026-11-24 修复：冷却期内（上次成功<6h）一律 SKIPPED，不点也不告警。
+    # 冷却起点由到期时间反推（到期-6h），比「到期时刻」更严格：
+    # 到期 18:03 ⇒ renewal 13:07 ⇒ 冷却到 19:07；16-18 点被拒是预期，不是异常。
+    # 这条必须在任何 FAILED 判定之前，否则就会出现 run #790 那种周期性假红。
+    cooling = in_cooldown(before, now=now)
+
     if limited_before:
-        # 2026-11-23 补：点前限制提示也不能无条件静默。
-        # 「面板要求到期后才能续」只解释了「未到期时弹限制」；已到期还弹就是异常 ——
-        # 该续却没续上，报 FAILED，否则同样是「静默烂到删机」的假成功（实测复现：
-        # before=今天、limited_before=True 旧版返回 SKIPPED/job 不红/TG 静默）。
-        if _expired_on(before, today):
+        # 「面板要求到期后才能续」解释了未到期弹限制；冷却中弹限制同样是预期。
+        # 只有「真过期了、且不在冷却」还被拒才是异常。
+        if cooling:
+            return Outcome.SKIPPED, "冷却中（上次续期后未满6h），点前限制提示属预期，本轮跳过"
+        if _expired_on(before, today, now=now):
             return (Outcome.FAILED,
                     f"已到期（{fmt_exp(before)}）但点击前就被拒绝续期（限制提示仍在），"
                     "续期未生效 —— 这是异常，需人工进面板确认")
         return Outcome.SKIPPED, "未到可续期时点（面板要求到期后才能续，点前已有限制提示）"
     if extend_ok(before, after, lo=lo, hi=hi):
         return Outcome.RENEWED, ""
+    if cooling:
+        return Outcome.SKIPPED, "冷却中（上次续期后未满6h），续期未生效属预期，本轮跳过"
     if limited_after:
-        if _expired_on(before, today):
+        if _expired_on(before, today, now=now):
             return (Outcome.FAILED,
                     f"已到期（{fmt_exp(before)}）却仍弹限制提示，续期未生效 —— "
                     "这不是「未到可续期时点」，是异常（该续却没续上），需人工进面板确认")
         return Outcome.SKIPPED, "未到可续期时点（点击后弹出限制提示，属预期：面板要求到期后才能续）"
     if before and after and before == after:
-        if _expired_on(before, today):
+        if _expired_on(before, today, now=now):
             return (Outcome.FAILED,
                     f"已到期（{fmt_exp(before)}）但到期时间没变，续期未生效 —— "
                     "这是异常（该续却没续上），需人工处理")
@@ -739,9 +779,15 @@ def run_browser() -> RunResult:
             return RunResult(Outcome.SKIPPED, "dry-run：未真正点击续期", expire=before,
                              shot=_shoot(sb, shot))
 
-        # 5.5) 距到期还远就本轮不点。
-        # 面板一次只 +6h、冷却 6h，太早点只会弹限制提示，白耗一次浏览器（实测 116 秒）。
-        # 读不到到期时间（remain is None）时**照点** —— 同文件头第 2 条。
+        # 5.5) 冷却期内 / 距到期还远就本轮不点。
+        # 2026-11-24 修复：冷却(6h) 比点击窗口(2h) 长，先判冷却再判窗口。
+        # 冷却中点了必被 "did it recently" 拒，白耗浏览器还会（旧版）误报 FAILED。
+        # 读不到到期时间（remain is None / 冷却判不出）时**照点** —— 同文件头第 2 条。
+        if in_cooldown(before):
+            print("⏱️ 冷却中（上次续期后未满6h），本轮不点按钮（也不告警）", flush=True)
+            return RunResult(Outcome.SKIPPED,
+                             "冷却中（上次续期后未满6h），本轮不点按钮（也不告警）",
+                             expire=before)
         remain = _hours_until(before)
         if remain is not None and remain > RENEW_WINDOW_H:
             print(f"⏱️ 距到期还有 {remain:.1f} 小时（> {RENEW_WINDOW_H}h），本轮不点按钮",
